@@ -1,3 +1,9 @@
+# bench runtime (never commit)
+.env
+/data/**
+/results/**
+/docker-compose.generated.yml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
