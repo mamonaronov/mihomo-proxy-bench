@@ -77,6 +77,7 @@ if [ -n "$leftovers" ]; then
 fi
 
 mkdir -p results
+python3 archive_probes.py
 echo "cold subscription cache for: ${IDS[*]}"
 for id in "${IDS[@]}"; do
   rm -rf "data/${id}"

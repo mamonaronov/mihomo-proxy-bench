@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import html
-import json
 import math
 import os
 import shutil
+import sqlite3
 import sys
 import time
 from collections import Counter, defaultdict
@@ -193,31 +193,102 @@ class Store:
         self.path = path
         self._lock = asyncio.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS probes (
+              rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              id TEXT NOT NULL,
+              ok INTEGER NOT NULL,
+              http_status INTEGER,
+              latency_ms REAL,
+              selected TEXT,
+              error TEXT
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS probes_id_ts ON probes(id, ts)")
+        self._conn.commit()
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "ts": row["ts"],
+            "id": row["id"],
+            "ok": bool(row["ok"]),
+            "http_status": row["http_status"],
+            "latency_ms": row["latency_ms"],
+            "selected": row["selected"],
+            "error": row["error"],
+        }
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            self._conn.close()
 
     async def append(self, record: dict[str, Any]) -> None:
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         async with self._lock:
-            with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-                fh.flush()
+            self._conn.execute(
+                """
+                INSERT INTO probes (ts, id, ok, http_status, latency_ms, selected, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("ts"),
+                    record.get("id"),
+                    1 if record.get("ok") else 0,
+                    record.get("http_status"),
+                    record.get("latency_ms"),
+                    record.get("selected"),
+                    record.get("error"),
+                ),
+            )
+            self._conn.commit()
 
-    async def read_all(self) -> list[dict[str, Any]]:
+    async def fetch_since(
+        self,
+        ids: list[str],
+        cutoff: datetime | None,
+    ) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        sql = (
+            "SELECT ts, id, ok, http_status, latency_ms, selected, error "
+            f"FROM probes WHERE id IN ({placeholders})"
+        )
+        params: list[Any] = list(ids)
+        if cutoff is not None:
+            sql += " AND ts >= ?"
+            params.append(cutoff.astimezone(timezone.utc).isoformat(timespec="seconds"))
+        sql += " ORDER BY ts ASC, rowid ASC"
         async with self._lock:
-            if not self.path.is_file():
-                return []
-            text = self.path.read_text(encoding="utf-8")
-        records: list[dict[str, Any]] = []
-        for raw in text.splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                item = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(item, dict):
-                records.append(item)
-        return records
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    async def latest(self, ids: list[str]) -> dict[str, dict[str, Any] | None]:
+        result: dict[str, dict[str, Any] | None] = {instance_id: None for instance_id in ids}
+        if not ids:
+            return result
+        async with self._lock:
+            for instance_id in ids:
+                row = self._conn.execute(
+                    """
+                    SELECT ts, id, ok, http_status, latency_ms, selected, error
+                    FROM probes
+                    WHERE id = ?
+                    ORDER BY ts DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (instance_id,),
+                ).fetchone()
+                if row is not None:
+                    result[instance_id] = self._row_to_record(row)
+        return result
 
 
 async def probe_socks(instance_id: str) -> dict[str, Any]:
@@ -408,25 +479,6 @@ def in_window(record: dict[str, Any], cutoff: datetime | None) -> datetime | Non
     if cutoff is not None and ts < cutoff:
         return None
     return ts
-
-
-def last_by_id(records: list[dict[str, Any]], ids: list[str]) -> dict[str, dict[str, Any] | None]:
-    latest: dict[str, dict[str, Any] | None] = {instance_id: None for instance_id in ids}
-    for record in records:
-        instance_id = record.get("id")
-        if instance_id not in latest:
-            continue
-        prev = latest[instance_id]
-        if prev is None:
-            latest[instance_id] = record
-            continue
-        prev_ts = parse_ts(str(prev.get("ts") or ""))
-        cur_ts = parse_ts(str(record.get("ts") or ""))
-        if cur_ts is None:
-            continue
-        if prev_ts is None or cur_ts >= prev_ts:
-            latest[instance_id] = record
-    return latest
 
 
 def summarize_id(
@@ -878,6 +930,7 @@ def header_block(ids: list[str]) -> str:
 
 def render_stats(
     records: list[dict[str, Any]],
+    latest: dict[str, dict[str, Any] | None],
     ids: list[str],
     period: str,
     view: str,
@@ -887,7 +940,6 @@ def render_stats(
         period = "1h"
     _delta, title = PERIODS[period]
     cutoff = window_cutoff(period)
-    latest = last_by_id(records, ids)
     focus = [instance_id] if view == "i" and instance_id in ids else ids
     stats = [summarize_id(records, item, cutoff) for item in focus]
 
@@ -1021,8 +1073,11 @@ async def show_panel(
     if instance_id is not None and instance_id not in ids:
         instance_id = None
         view = "s"
-    records = await store.read_all()
-    text = render_stats(records, ids, period, view, instance_id)
+    if period not in PERIODS:
+        period = "1h"
+    records = await store.fetch_since(ids, window_cutoff(period))
+    latest = await store.latest(ids)
+    text = render_stats(records, latest, ids, period, view, instance_id)
     markup = stats_keyboard(period, view, ids, instance_id)
     if message_id is not None:
         try:
@@ -1122,12 +1177,12 @@ async def amain() -> None:
     secret = require_env("MIHOMO_API_SECRET")
     ids = parse_ids()
     proxy = os.environ.get("TELEGRAM_PROXY_URL", "socks5h://proxy:11808").strip()
-    results_path = Path(os.environ.get("RESULTS_PATH", "/app/results/probes.jsonl"))
+    results_path = Path(os.environ.get("RESULTS_PATH", "/app/results/probes.db"))
 
     store = Store(results_path)
     tg = Telegram(token, proxy)
     api_client = httpx.AsyncClient(timeout=CURL_MAX_TIME_SEC, trust_env=False)
-    print(f"bench-bot starting ids={ids} Bot API via {proxy}", flush=True)
+    print(f"bench-bot starting ids={ids} Bot API via {proxy} db={results_path}", flush=True)
     try:
         await tg.set_commands()
     except Exception as exc:  # noqa: BLE001
@@ -1140,6 +1195,7 @@ async def amain() -> None:
     finally:
         await tg.aclose()
         await api_client.aclose()
+        await store.aclose()
 
 
 if __name__ == "__main__":

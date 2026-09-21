@@ -119,7 +119,7 @@ def bot_service(ids: list[str]) -> str:
             "    environment:",
             f'      BENCH_INSTANCE_IDS: "{",".join(ids)}"',
             '      TELEGRAM_PROXY_URL: "socks5h://proxy:11808"',
-            "      RESULTS_PATH: /app/results/probes.jsonl",
+            "      RESULTS_PATH: /app/results/probes.db",
             "      PYTHONUNBUFFERED: \"1\"",
             "    volumes:",
             "      - ./results:/app/results",
