@@ -49,10 +49,14 @@ def init_archive(conn: sqlite3.Connection) -> None:
           http_status INTEGER,
           latency_ms REAL,
           selected TEXT,
-          error TEXT
+          error TEXT,
+          host_uptime_s REAL
         )
         """
     )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(probes)")}
+    if "host_uptime_s" not in cols:
+        conn.execute("ALTER TABLE probes ADD COLUMN host_uptime_s REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS probes_run_id_ts ON probes(run_id, ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS probes_id_ts ON probes(id, ts)")
     conn.commit()
@@ -81,10 +85,12 @@ def archive_run(live: Path, archive: Path) -> tuple[str, int]:
             conn.close()
             remove_live(live)
             return run_id, 0
+        live_cols = {row[1] for row in conn.execute("PRAGMA live.table_info(probes)")}
+        host_sel = "host_uptime_s" if "host_uptime_s" in live_cols else "NULL"
         conn.execute(
-            """
-            INSERT INTO probes (run_id, ts, id, ok, http_status, latency_ms, selected, error)
-            SELECT ?, ts, id, ok, http_status, latency_ms, selected, error
+            f"""
+            INSERT INTO probes (run_id, ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s)
+            SELECT ?, ts, id, ok, http_status, latency_ms, selected, error, {host_sel}
             FROM live.probes
             """,
             (run_id,),

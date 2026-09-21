@@ -20,6 +20,7 @@ from urllib.parse import quote
 import httpx
 
 from app_version import app_build_identity
+from downtime import downtime_ticks
 
 PROBE_INTERVAL_SEC = 1
 CURL_MAX_TIME_SEC = 8
@@ -209,10 +210,14 @@ class Store:
               http_status INTEGER,
               latency_ms REAL,
               selected TEXT,
-              error TEXT
+              error TEXT,
+              host_uptime_s REAL
             )
             """
         )
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(probes)")}
+        if "host_uptime_s" not in cols:
+            self._conn.execute("ALTER TABLE probes ADD COLUMN host_uptime_s REAL")
         self._conn.execute("CREATE INDEX IF NOT EXISTS probes_id_ts ON probes(id, ts)")
         self._conn.commit()
 
@@ -226,6 +231,7 @@ class Store:
             "latency_ms": row["latency_ms"],
             "selected": row["selected"],
             "error": row["error"],
+            "host_uptime_s": row["host_uptime_s"],
         }
 
     async def aclose(self) -> None:
@@ -236,8 +242,8 @@ class Store:
         async with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO probes (ts, id, ok, http_status, latency_ms, selected, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO probes (ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.get("ts"),
@@ -247,6 +253,7 @@ class Store:
                     record.get("latency_ms"),
                     record.get("selected"),
                     record.get("error"),
+                    record.get("host_uptime_s"),
                 ),
             )
             self._conn.commit()
@@ -260,7 +267,7 @@ class Store:
             return []
         placeholders = ",".join("?" for _ in ids)
         sql = (
-            "SELECT ts, id, ok, http_status, latency_ms, selected, error "
+            "SELECT ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s "
             f"FROM probes WHERE id IN ({placeholders})"
         )
         params: list[Any] = list(ids)
@@ -280,7 +287,7 @@ class Store:
             for instance_id in ids:
                 row = self._conn.execute(
                     """
-                    SELECT ts, id, ok, http_status, latency_ms, selected, error
+                    SELECT ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s
                     FROM probes
                     WHERE id = ?
                     ORDER BY ts DESC, rowid DESC
@@ -376,7 +383,12 @@ async def selected_node(client: httpx.AsyncClient, instance_id: str, secret: str
     return current
 
 
-def probe_fail_record(instance_id: str, ts: str, error: str) -> dict[str, Any]:
+def probe_fail_record(
+    instance_id: str,
+    ts: str,
+    error: str,
+    host_uptime_s: float | None = None,
+) -> dict[str, Any]:
     return {
         "ts": ts,
         "id": instance_id,
@@ -385,6 +397,7 @@ def probe_fail_record(instance_id: str, ts: str, error: str) -> dict[str, Any]:
         "latency_ms": None,
         "selected": None,
         "error": error[:240],
+        "host_uptime_s": host_uptime_s,
     }
 
 
@@ -416,15 +429,17 @@ async def record_probe(
     secret: str,
 ) -> None:
     ts = now_iso()
+    host_up = host_uptime_seconds()
     try:
         record = await asyncio.wait_for(
             probe_one(api_client, instance_id, secret, ts),
             timeout=PROBE_WAIT_SEC,
         )
+        record["host_uptime_s"] = host_up
     except asyncio.TimeoutError:
-        record = probe_fail_record(instance_id, ts, "timeout")
+        record = probe_fail_record(instance_id, ts, "timeout", host_up)
     except Exception as exc:  # noqa: BLE001
-        record = probe_fail_record(instance_id, ts, str(exc))
+        record = probe_fail_record(instance_id, ts, str(exc), host_up)
     await store.append(record)
 
 
@@ -535,6 +550,26 @@ def summarize_id(
             if fail_streak > longest_fail:
                 longest_fail = fail_streak
     expected = expected_ticks(cutoff, records, instance_id)
+    window_start = cutoff
+    if window_start is None and window:
+        window_start = parse_ts(str(window[0].get("ts") or ""))
+    heartbeats: list[tuple[datetime, float | None]] = []
+    for row in window:
+        ts = parse_ts(str(row.get("ts") or ""))
+        if ts is None:
+            continue
+        raw_up = row.get("host_uptime_s")
+        host_up = float(raw_up) if isinstance(raw_up, (int, float)) else None
+        heartbeats.append((ts, host_up))
+    service_down, server_off = downtime_ticks(
+        heartbeats,
+        window_start=window_start,
+        window_end=now_utc(),
+        interval_seconds=PROBE_INTERVAL_SEC,
+        now_host_uptime_s=host_uptime_seconds(),
+    )
+    buckets["service_down"] = service_down
+    buckets["server_off"] = server_off
     return {
         "id": instance_id,
         "n": n,
@@ -882,6 +917,8 @@ def bucket_block(item: dict[str, Any], expected: int) -> list[str]:
     rows = [(label, int(buckets.get(label, 0))) for label, _lo, _hi in BUCKETS]
     rows.append(("Таймаут", int(buckets.get("timeout", 0))))
     rows.append(("Другой fail", int(buckets.get("fail", 0))))
+    rows.append(("Сервис не запущен", int(buckets.get("service_down", 0))))
+    rows.append(("Сервер выключен", int(buckets.get("server_off", 0))))
     observed = sum(count for _, count in rows)
     total = max(expected, observed) if expected else observed
     table = [
