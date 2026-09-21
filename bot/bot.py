@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 import httpx
 
-PROBE_INTERVAL_SEC = 5
+PROBE_INTERVAL_SEC = 1
 CURL_MAX_TIME_SEC = 8
 PROBE_WAIT_SEC = CURL_MAX_TIME_SEC + 2
 TELEGRAM_POLL_TIMEOUT = 50
