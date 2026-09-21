@@ -18,6 +18,21 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || err "missing command: $1"
 }
 
+load_git_version() {
+  if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
+    # Prefer the last real change, not "Merge branch 'main' of https://..."
+    GIT_COMMIT_TITLE="$(git -C "$ROOT" log -1 --first-parent --no-merges --pretty=%s)"
+    if [ -z "$GIT_COMMIT_TITLE" ]; then
+      GIT_COMMIT_TITLE="$(git -C "$ROOT" log -1 --pretty=%s)"
+    fi
+  else
+    GIT_COMMIT="unknown"
+    GIT_COMMIT_TITLE="unknown"
+  fi
+  export GIT_COMMIT GIT_COMMIT_TITLE
+}
+
 env_value() {
   local key="$1"
   local line
@@ -83,6 +98,10 @@ for id in "${IDS[@]}"; do
   rm -rf "data/${id}"
   mkdir -p "data/${id}/providers"
 done
+
+echo "git commit for bench-bot image"
+load_git_version
+echo "  ${GIT_COMMIT} ${GIT_COMMIT_TITLE}"
 
 echo "building ${IMAGE} from git (pull + no-cache) and bench-bot..."
 docker compose -f "$COMPOSE_FILE" build --pull --no-cache

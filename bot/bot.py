@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import httpx
 
+from app_version import app_build_identity
+
 PROBE_INTERVAL_SEC = 1
 CURL_MAX_TIME_SEC = 8
 PROBE_WAIT_SEC = CURL_MAX_TIME_SEC + 2
@@ -918,10 +920,12 @@ def current_nodes(latest: dict[str, dict[str, Any] | None], ids: list[str]) -> l
 
 
 def header_block(ids: list[str]) -> str:
+    commit, title = app_build_identity()
     return kv_pre(
         [
             ("Аптайм бота", seconds_human(bot_uptime_seconds())),
             ("Аптайм сервера", seconds_human(host_uptime_seconds())),
+            ("Коммит", f"{title} ({commit})"),
             ("Интервал проб", f"{PROBE_INTERVAL_SEC} с"),
             ("Кандидаты", ", ".join(ids)),
         ]

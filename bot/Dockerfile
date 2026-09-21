@@ -7,7 +7,13 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py .
+COPY bot.py app_version.py ./
+
+ARG GIT_COMMIT=unknown
+ARG GIT_COMMIT_TITLE=unknown
+RUN printf 'commit=%s\ntitle=%s\n' "$GIT_COMMIT" "$GIT_COMMIT_TITLE" > /app/.build-git
 
 ENV PYTHONUNBUFFERED=1
+ENV APP_GIT_COMMIT=$GIT_COMMIT
+ENV APP_GIT_COMMIT_TITLE=$GIT_COMMIT_TITLE
 CMD ["python", "-u", "bot.py"]
