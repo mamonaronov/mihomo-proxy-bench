@@ -62,6 +62,7 @@ COMMANDS = {
 }
 
 _started_monotonic: float | None = None
+_ignored_chats: set[str] = set()
 
 
 def die(message: str) -> None:
@@ -100,6 +101,18 @@ def parse_ts(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def note_ignored_chat(chat_id: object, allowed_chat_id: str) -> None:
+    key = str(chat_id)
+    if key in _ignored_chats:
+        return
+    _ignored_chats.add(key)
+    print(
+        f"ignored chat_id={key} (ALLOWED_CHAT_ID={allowed_chat_id})",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def mark_bot_started() -> None:
@@ -912,6 +925,55 @@ def stats_table(item: dict[str, Any], expected: int) -> list[str]:
     return [kv_pre(rows)]
 
 
+def compact_row(item: dict[str, Any]) -> tuple[str, str]:
+    n = int(item["n"])
+    if n == 0:
+        return (str(item["id"]), "нет проб")
+    success = fmt_pct(int(item["ok"]), n)
+    return (
+        str(item["id"]),
+        f"{success}  p50 {fmt_ms(item['p50'])}  таймауты {item['timeouts']}",
+    )
+
+
+def _strip_tags(text: str) -> str:
+    out: list[str] = []
+    skip = False
+    for ch in text:
+        if ch == "<":
+            skip = True
+            continue
+        if ch == ">":
+            skip = False
+            continue
+        if not skip:
+            out.append(ch)
+    return "".join(out)
+
+
+def _tags_balanced(text: str) -> bool:
+    for tag in ("b", "pre", "code"):
+        if text.count(f"<{tag}>") != text.count(f"</{tag}>"):
+            return False
+    return True
+
+
+def fit_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    """Keep a valid HTML message. Never cut through a tag."""
+    if len(text) <= limit and _tags_balanced(text):
+        return text
+    parts = text.split("\n\n")
+    while len(parts) > 1 and len("\n\n".join(parts)) > limit:
+        parts.pop()
+    fitted = "\n\n".join(parts)
+    if len(fitted) <= limit and _tags_balanced(fitted):
+        return fitted
+    plain = html.unescape(_strip_tags(text))
+    if len(plain) > limit:
+        plain = plain[: limit - 1] + "…"
+    return html.escape(plain)
+
+
 def bucket_block(item: dict[str, Any], expected: int) -> list[str]:
     buckets: dict[str, int] = item["buckets"]
     rows = [(label, int(buckets.get(label, 0))) for label, _lo, _hi in BUCKETS]
@@ -996,6 +1058,10 @@ def render_stats(
             lines.append("")
             lines.append(f"<b>Топ нод · {html.escape(item)}</b>")
             lines.extend(node_lines(top_nodes(records, item, cutoff)))
+    elif len(stats) > 1:
+        lines.append("")
+        lines.append(kv_pre([compact_row(item) for item in stats]))
+        lines.append("Полные цифры — кнопка схемы.")
     else:
         for item in stats:
             expected = int(item.get("expected") or 0)
@@ -1008,10 +1074,7 @@ def render_stats(
             lines.append("")
             lines.extend(bucket_block(item, expected))
 
-    text = "\n".join(lines)
-    if len(text) > TELEGRAM_TEXT_LIMIT:
-        text = text[: TELEGRAM_TEXT_LIMIT - 1] + "…"
-    return text
+    return fit_telegram_text("\n".join(lines))
 
 
 class Telegram:
@@ -1082,6 +1145,10 @@ class Telegram:
             payload["text"] = text
         await self.call("answerCallbackQuery", payload)
 
+    async def delete_webhook(self) -> None:
+        # A leftover webhook makes getUpdates return nothing, so /start is silent.
+        await self.call("deleteWebhook", {})
+
     async def set_commands(self) -> None:
         await self.call(
             "setMyCommands",
@@ -1126,7 +1193,11 @@ async def show_panel(
             return
         except RuntimeError as exc:
             print(f"editMessageText failed: {exc}", file=sys.stderr)
-    await tg.send(chat_id, text, markup)
+    try:
+        await tg.send(chat_id, text, markup)
+    except RuntimeError as exc:
+        print(f"sendMessage failed: {exc}", file=sys.stderr)
+        await tg.send(chat_id, "Панель не отправилась. Открой одну схему кнопкой.", None)
 
 
 async def poll_loop(
@@ -1172,6 +1243,7 @@ async def dispatch_update(
         chat_id = chat.get("id")
         callback_id = str(callback.get("id") or "")
         if chat_id is None or str(chat_id) != allowed_chat_id:
+            note_ignored_chat(chat_id, allowed_chat_id)
             if callback_id:
                 await tg.answer_callback(callback_id)
             return
@@ -1195,6 +1267,7 @@ async def dispatch_update(
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
     if chat_id is None or str(chat_id) != allowed_chat_id:
+        note_ignored_chat(chat_id, allowed_chat_id)
         return
     text = str(message.get("text") or "").strip()
     if not text:
@@ -1202,6 +1275,7 @@ async def dispatch_update(
     cmd = command_name(text)
     if cmd not in COMMANDS:
         return
+    print(f"cmd {cmd} chat={chat_id}", flush=True)
     period = "1h"
     view = "s"
     if cmd == "/status":
@@ -1224,6 +1298,10 @@ async def amain() -> None:
     tg = Telegram(token, proxy)
     api_client = httpx.AsyncClient(timeout=CURL_MAX_TIME_SEC, trust_env=False)
     print(f"bench-bot starting ids={ids} Bot API via {proxy} db={results_path}", flush=True)
+    try:
+        await tg.delete_webhook()
+    except Exception as exc:  # noqa: BLE001
+        print(f"deleteWebhook failed: {exc}", file=sys.stderr)
     try:
         await tg.set_commands()
     except Exception as exc:  # noqa: BLE001
