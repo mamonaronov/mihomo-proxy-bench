@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -105,11 +106,17 @@ def mihomo_service(instance_id: str, with_build: bool) -> str:
     return "\n".join(lines)
 
 
+def host_user() -> str:
+    """Uid of whoever runs up.sh, so probes.db is not created as root."""
+    return f"{os.getuid()}:{os.getgid()}"
+
+
 def bot_service(ids: list[str]) -> str:
     depends = "\n".join(f"      - mihomo-bench-{i}" for i in ids)
     return "\n".join(
         [
             "  bench-bot:",
+            f'    user: "{host_user()}"',
             "    build:",
             "      context: ./bot",
             "      args:",

@@ -14,6 +14,41 @@ err() {
   exit 1
 }
 
+results_writable() {
+  local path
+  [ -w results ] || return 1
+  while IFS= read -r path; do
+    [ -w "$path" ] || return 1
+  done < <(find results -mindepth 1 -print)
+  return 0
+}
+
+chown_results_via_docker() {
+  local image="" candidate
+  for candidate in "$BOT_IMAGE" python:3.12-slim-bookworm python:3.12-slim; do
+    if docker image inspect "$candidate" >/dev/null 2>&1; then
+      image="$candidate"
+      break
+    fi
+  done
+  if [ -z "$image" ]; then
+    printf '%s\n' "warning: no local image to chown results/" >&2
+    return 1
+  fi
+  docker run --rm --user 0 \
+    -v "$ROOT/results:/results" \
+    --entrypoint python \
+    "$image" -c '
+import os, sys
+uid_s, gid_s = sys.argv[1].split(":")
+uid, gid = int(uid_s), int(gid_s)
+for dirpath, dirnames, filenames in os.walk("/results"):
+    os.chown(dirpath, uid, gid)
+    for name in dirnames + filenames:
+        os.chown(os.path.join(dirpath, name), uid, gid, follow_symlinks=False)
+' "$(id -u):$(id -g)"
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || err "missing command: $1"
 }
@@ -92,6 +127,10 @@ if [ -n "$leftovers" ]; then
 fi
 
 mkdir -p results
+if ! results_writable; then
+  echo "results/ is not writable by $(id -un); taking ownership via docker..."
+  chown_results_via_docker || printf '%s\n' "warning: chown failed; archive will try a read-only copy" >&2
+fi
 python3 archive_probes.py
 echo "cold subscription cache for: ${IDS[*]}"
 for id in "${IDS[@]}"; do

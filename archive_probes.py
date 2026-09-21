@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent
 LIVE_DEFAULT = ROOT / "results" / "probes.db"
@@ -25,6 +26,22 @@ def checkpoint(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def readonly_snapshot(path: Path) -> Path:
+    """Copy a db the current user can read but not write (typically root:644)."""
+    snap = sidecar(path, ".archive-snap")
+    snap.unlink(missing_ok=True)
+    uri = "file:" + quote(str(path.resolve()), safe="/") + "?mode=ro"
+    src = sqlite3.connect(uri, uri=True)
+    dst = sqlite3.connect(str(snap))
+    try:
+        src.backup(dst)
+        dst.commit()
+    finally:
+        src.close()
+        dst.close()
+    return snap
 
 
 def table_exists(conn: sqlite3.Connection, schema: str, name: str) -> bool:
@@ -63,23 +80,39 @@ def init_archive(conn: sqlite3.Connection) -> None:
 
 
 def remove_live(path: Path) -> None:
-    path.unlink(missing_ok=True)
-    sidecar(path, "-wal").unlink(missing_ok=True)
-    sidecar(path, "-shm").unlink(missing_ok=True)
+    for target in (path, sidecar(path, "-wal"), sidecar(path, "-shm")):
+        try:
+            target.unlink(missing_ok=True)
+        except OSError as exc:
+            raise SystemExit(
+                f"archive_probes: rows were copied, but could not delete {target}: {exc}"
+            ) from exc
 
 
 def archive_run(live: Path, archive: Path) -> tuple[str, int]:
     if not live.is_file():
         return "", 0
 
-    checkpoint(live)
+    source = live
+    snap: Path | None = None
+    try:
+        checkpoint(live)
+    except sqlite3.OperationalError as exc:
+        if "readonly" not in str(exc).lower():
+            raise
+        print(
+            "archive_probes: live db is not writable, copying read-only",
+            file=sys.stderr,
+        )
+        source = readonly_snapshot(live)
+        snap = source
     archive.parent.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
     conn = sqlite3.connect(str(archive))
     try:
         init_archive(conn)
-        conn.execute("ATTACH DATABASE ? AS live", (str(live.resolve()),))
+        conn.execute("ATTACH DATABASE ? AS live", (str(source.resolve()),))
         if not table_exists(conn, "live", "probes"):
             conn.execute("DETACH DATABASE live")
             conn.close()
@@ -100,6 +133,8 @@ def archive_run(live: Path, archive: Path) -> tuple[str, int]:
         conn.execute("DETACH DATABASE live")
     finally:
         conn.close()
+        if snap is not None:
+            snap.unlink(missing_ok=True)
 
     remove_live(live)
     return run_id, int(copied)

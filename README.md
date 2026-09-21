@@ -44,6 +44,8 @@ chmod +x up.sh down.sh
 ./down.sh  # docker compose down без -v
 ```
 
+Бот в контейнере работает под uid того, кто запустил `./up.sh`, поэтому `results/probes.db` не остаётся root-only. Если прошлый прогон уже записал базу от root, `up.sh` забирает `results/` через docker до архивации.
+
 После `git push` в mihomo-proxy снова `./up.sh` — следующий up клонирует `main` (или `MIHOMO_PROXY_REF`) и тянет свежий `metacubex/mihomo:latest`. Незакоммиченные локальные правки прокси не подхватываются. Образ называется `mihomo-proxy-bench`, тег `mihomo-proxy` не трогаем.
 
 Победившую схему перенеси в прод руками: скопируй yaml в `config.yaml` репозитория mihomo-proxy и задеплой прод как обычно.
