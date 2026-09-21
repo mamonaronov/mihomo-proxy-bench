@@ -697,7 +697,7 @@ def _pick_dimension(
 ) -> dict[str, Any]:
     scored = [(item, item.get(key)) for item in stats if item.get(key) is not None]
     if not scored:
-        return {"winner": None, "tied": True, "text": "нет данных"}
+        return {"winner": None, "loser": None, "tied": True, "text": "нет данных"}
 
     def norm(value: Any) -> Any:
         if isinstance(value, float) and key in {"p50", "p95", "p99", "avg", "stdev"}:
@@ -707,6 +707,17 @@ def _pick_dimension(
         return value
 
     ranked = sorted(scored, key=lambda pair: norm(pair[1]), reverse=higher)
+
+    def unique_edge(index: int) -> str | None:
+        if len(ranked) < 2:
+            return None
+        edge = norm(ranked[index][1])
+        tied_edge = [item for item, value in ranked if norm(value) == edge]
+        if len(tied_edge) != 1:
+            return None
+        return str(ranked[index][0]["id"])
+
+    loser = unique_edge(-1)
     best_item, best = ranked[0]
     best_n = norm(best)
     tied = [item for item, value in ranked if norm(value) == best_n]
@@ -714,6 +725,7 @@ def _pick_dimension(
         names = ", ".join(str(item["id"]) for item in tied)
         return {
             "winner": None,
+            "loser": loser,
             "tied": True,
             "text": f"ничья {names}  ({fmt(best_item)})",
         }
@@ -721,7 +733,7 @@ def _pick_dimension(
     detail = f"{best_item['id']}  {fmt(best_item)}"
     if rest:
         detail = f"{detail} · {rest}"
-    return {"winner": str(best_item["id"]), "tied": False, "text": detail}
+    return {"winner": str(best_item["id"]), "loser": loser, "tied": False, "text": detail}
 
 
 def compare_stats(stats: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -771,10 +783,14 @@ def compare_stats(stats: list[dict[str, Any]]) -> dict[str, Any] | None:
         ),
     ]
     scores: dict[str, float] = {str(item["id"]): 0.0 for item in usable}
+    bad_scores: dict[str, float] = {str(item["id"]): 0.0 for item in usable}
     for _name, result, weight in dimensions:
         winner = result["winner"]
         if winner:
             scores[winner] += weight
+        loser = result["loser"]
+        if loser:
+            bad_scores[loser] += weight
     by_success = sorted(
         [item for item in usable if item.get("success") is not None],
         key=lambda item: (-float(item["success"]), item["id"]),
@@ -789,18 +805,32 @@ def compare_stats(stats: list[dict[str, Any]]) -> dict[str, Any] | None:
         best = ranked_ids[0]
         second = ranked_ids[1] if len(ranked_ids) > 1 else None
         overall = None if second is not None and scores[best] == scores[second] else best
+    pool = {item_id: score for item_id, score in bad_scores.items() if item_id != overall}
+    ranked_bad = sorted(pool, key=lambda instance_id: (-pool[instance_id], instance_id))
+    exclude = None
+    if ranked_bad and pool[ranked_bad[0]] > 0:
+        worst = ranked_bad[0]
+        second_bad = ranked_bad[1] if len(ranked_bad) > 1 else None
+        if second_bad is None or pool[worst] != pool[second_bad]:
+            exclude = worst
     wins = [name for name, result, _w in dimensions if result["winner"] == overall]
     losses = [
         f"{name} ({result['winner']})"
         for name, result, _w in dimensions
         if overall and result["winner"] and result["winner"] != overall
     ]
+    exclude_worse = [name for name, result, _w in dimensions if exclude and result["loser"] == exclude]
+    exclude_better = [name for name, result, _w in dimensions if exclude and result["winner"] == exclude]
     return {
         "overall": overall,
+        "exclude": exclude,
         "scores": scores,
+        "bad_scores": bad_scores,
         "dimensions": [(name, result) for name, result, _w in dimensions],
         "wins": wins,
         "losses": losses,
+        "exclude_worse": exclude_worse,
+        "exclude_better": exclude_better,
     }
 
 
@@ -813,24 +843,40 @@ def verdict_block(stats: list[dict[str, Any]]) -> list[str]:
     overall = verdict["overall"]
     if overall is None:
         lines.append("Рекомендация: ничья — смотри параметры выше.")
-        return lines
-    text = f"<b>Рекомендация:</b> <code>{html.escape(overall)}</code>"
-    wins = verdict["wins"]
-    losses = verdict["losses"]
-    bits: list[str] = []
-    if wins:
-        bits.append("лучше по: " + ", ".join(wins))
-    if losses:
-        bits.append("уступает по: " + ", ".join(losses))
-    if bits:
-        text += " — " + "; ".join(bits) + "."
     else:
-        text += "."
-    if any(name == "Надёжность" for name in wins):
-        text += " Для Telegram-ботов надёжность важнее сырой скорости."
-    elif any(name == "Надёжность" and result["winner"] not in {None, overall} for name, result in verdict["dimensions"]):
-        text += " Быстрее по отдельным задержкам, но чаще теряет Bot API — для прода обычно хуже."
-    lines.append(text)
+        text = f"<b>Рекомендация:</b> <code>{html.escape(overall)}</code>"
+        wins = verdict["wins"]
+        losses = verdict["losses"]
+        bits: list[str] = []
+        if wins:
+            bits.append("лучше по: " + ", ".join(wins))
+        if losses:
+            bits.append("уступает по: " + ", ".join(losses))
+        if bits:
+            text += " — " + "; ".join(bits) + "."
+        else:
+            text += "."
+        if any(name == "Надёжность" for name in wins):
+            text += " Для Telegram-ботов надёжность важнее сырой скорости."
+        elif any(name == "Надёжность" and result["winner"] not in {None, overall} for name, result in verdict["dimensions"]):
+            text += " Быстрее по отдельным задержкам, но чаще теряет Bot API — для прода обычно хуже."
+        lines.append(text)
+    exclude = verdict.get("exclude")
+    if exclude:
+        drop = f"<b>Исключить:</b> <code>{html.escape(str(exclude))}</code>"
+        drop_bits: list[str] = []
+        worse = verdict.get("exclude_worse") or []
+        better = verdict.get("exclude_better") or []
+        if worse:
+            drop_bits.append("хуже по: " + ", ".join(worse))
+        if better:
+            drop_bits.append("лучше по: " + ", ".join(better))
+        if drop_bits:
+            drop += " — " + "; ".join(drop_bits) + "."
+        else:
+            drop += "."
+        drop += " Лучше убрать из сравнения."
+        lines.append(drop)
     return lines
 
 
