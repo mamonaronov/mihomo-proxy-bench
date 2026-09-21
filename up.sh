@@ -63,10 +63,23 @@ fi
 mapfile -t IDS < <(python3 generate_compose.py --write "$COMPOSE_FILE" --print-ids)
 [ "${#IDS[@]}" -gt 0 ] || err "generator returned no instance ids"
 
+# Stop running bench first. If we wipe providers while mihomo is still up,
+# the long --no-cache build lets it refill cache.db / providers before recreate.
+echo "stopping previous bench containers (prod is left running)..."
+docker compose -f "$COMPOSE_FILE" down
+# leftover names if a yaml id was renamed since the last compose file
+leftovers="$(
+  { docker ps -aq --filter name=mihomo-bench-; docker ps -aq --filter name=bench-bot; } | sort -u
+)"
+if [ -n "$leftovers" ]; then
+  # shellcheck disable=SC2086
+  docker rm -f $leftovers
+fi
+
 mkdir -p results
+echo "cold subscription cache for: ${IDS[*]}"
 for id in "${IDS[@]}"; do
-  mkdir -p "data/${id}"
-  rm -rf "data/${id}/providers"
+  rm -rf "data/${id}"
   mkdir -p "data/${id}/providers"
 done
 

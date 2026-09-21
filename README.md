@@ -34,7 +34,7 @@ Yaml-кандидаты: имя файла без `.yaml` = id.
 
 ```bash
 chmod +x up.sh down.sh
-./up.sh    # чистит data/<id>/providers, собирает образ с git --pull --no-cache, recreate
+./up.sh    # stop bench, wipe data/<id> (providers + cache.db), build from git, recreate
 ./down.sh  # docker compose down без -v
 ```
 
@@ -52,7 +52,7 @@ Long polling, портов на хост нет. Чужие чаты игнор�
 
 ## Холодный кэш и deadlock
 
-Каждый up стартует с **пустым** `data/<id>/providers`. Кэш прода не копируется.
+Каждый `./up.sh` — отдельный прогон сравнения с **холодным** кэшем подписок: сначала останавливает тестовые контейнеры (прод не трогает), затем стирает весь `data/<id>` (yaml провайдеров и `cache.db`) и поднимает инстансы заново. Кэш прода не копируется. `results/probes.jsonl` не трогаем.
 
 Провайдеры качаются через группу `SUBSCRIBE`: сначала `DIRECT`, потом `AUTO`. Если GitHub закрыт и кэш пустой, подписки не скачаются, пока туннель не поднимется — deadlock. Не указывай провайдерам `proxy: AUTO` в одиночку.
 
