@@ -1,0 +1,287 @@
+# Candidate: all live subscriptions (sub1…sub5) in one url-test AUTO.
+# Schema only: subscription URLs and API secret come from bench .env
+# (${SUB1_URL} … ${SUB8_URL}, ${MIHOMO_API_SECRET}) via entrypoint envsubst.
+# Do not publish mixed-port / API. Alias is proxy-urltest, never proxy.
+#
+# AUTO = url-test(sub1+sub2+sub3+sub4+sub5). No FAST/BACKUP split, no WHITELIST.
+# Region exclude is off — Anycast and expire rows only. Bot API health: HTTP 404.
+# Providers use SUBSCRIBE: DIRECT first, AUTO if GitHub is blocked.
+# Do not point providers at AUTO alone — deadlock when the tunnel is down.
+# Cached provider YAML still works if both DIRECT and AUTO fail.
+
+mixed-port: 11808
+bind-address: "*"
+allow-lan: true
+mode: rule
+log-level: info
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+keep-alive-interval: 15
+find-process-mode: off
+geodata-mode: false
+geo-auto-update: false
+global-client-fingerprint: chrome
+
+external-controller: 0.0.0.0:19090
+secret: "${MIHOMO_API_SECRET}"
+
+profile:
+  store-selected: true
+  store-fake-ip: false
+
+dns:
+  enable: true
+  ipv6: false
+  # SOCKS bots need real IPs. fake-ip is for TUN on a laptop.
+  enhanced-mode: redir-host
+  # IP-literal DoH: no UDP/53 bootstrap, so RU hijack cannot poison dns.google.
+  default-nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+  nameserver:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+  fallback:
+    - https://1.0.0.1/dns-query
+    - https://8.8.4.4/dns-query
+  fallback-filter:
+    geoip: false
+
+proxy-providers:
+  sub1:
+    type: http
+    url: "${SUB1_URL}"
+    path: ./providers/sub1.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s1 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  sub2:
+    type: http
+    url: "${SUB2_URL}"
+    path: ./providers/sub2.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s2 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  sub3:
+    type: http
+    url: "${SUB3_URL}"
+    path: ./providers/sub3.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s3 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  sub4:
+    type: http
+    url: "${SUB4_URL}"
+    path: ./providers/sub4.yaml
+    interval: 3600
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s4 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  sub5:
+    type: http
+    url: "${SUB5_URL}"
+    path: ./providers/sub5.yaml
+    interval: 3600
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s5 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  # sub6:
+  #   type: http
+  #   url: "${SUB6_URL}"
+  #   path: ./providers/sub6.yaml
+  #   interval: 3600
+  #   size-limit: 10485760
+  #   proxy: SUBSCRIBE
+  #   header:
+  #     User-Agent:
+  #       - "clash.meta"
+  #       - "mihomo"
+  #       - "clash-verge"
+  #   health-check:
+  #     enable: true
+  #     url: https://www.gstatic.com/generate_204
+  #     interval: 600
+  #     timeout: 4000
+  #     lazy: false
+  #     expected-status: 204
+  #   override:
+  #     additional-prefix: "s6 | "
+  #     udp: true
+  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  # sub7:
+  #   type: http
+  #   url: "${SUB7_URL}"
+  #   path: ./providers/sub7.yaml
+  #   interval: 3600
+  #   size-limit: 10485760
+  #   proxy: SUBSCRIBE
+  #   header:
+  #     User-Agent:
+  #       - "clash.meta"
+  #       - "mihomo"
+  #       - "clash-verge"
+  #   health-check:
+  #     enable: true
+  #     url: https://www.gstatic.com/generate_204
+  #     interval: 600
+  #     timeout: 4000
+  #     lazy: false
+  #     expected-status: 204
+  #   override:
+  #     additional-prefix: "s7 | "
+  #     udp: true
+  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+  # sub8:
+  #   type: http
+  #   url: "${SUB8_URL}"
+  #   path: ./providers/sub8.yaml
+  #   interval: 3600
+  #   size-limit: 10485760
+  #   proxy: SUBSCRIBE
+  #   header:
+  #     User-Agent:
+  #       - "clash.meta"
+  #       - "mihomo"
+  #       - "clash-verge"
+  #   health-check:
+  #     enable: true
+  #     url: https://www.gstatic.com/generate_204
+  #     interval: 600
+  #     timeout: 4000
+  #     lazy: false
+  #     expected-status: 204
+  #   override:
+  #     additional-prefix: "s8 | "
+  #     udp: true
+  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+
+proxy-groups:
+  # Real Bot API: GET /bot is 404 JSON. 200/301/302 matches DPI redirects.
+  # Provider health-checks still use gstatic for general liveness.
+  # All live providers compete in AUTO; url-test should drop nodes that
+  # look fast on Google/DPI but cannot carry Bot API.
+  - name: AUTO
+    type: url-test
+    use:
+      - sub1
+      - sub2
+      - sub3
+      - sub4
+      - sub5
+    url: https://api.telegram.org/bot
+    interval: 30
+    timeout: 4000
+    tolerance: 100
+    lazy: false
+    max-failed-times: 1
+    expected-status: 404
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅|Anycast"
+
+  - name: SUBSCRIBE
+    type: fallback
+    proxies:
+      - DIRECT
+      - AUTO
+    # Same host family as provider URLs. Bot API would make DIRECT always fail
+    # in RU, so every pull would go through the tunnel.
+    url: https://github.com/favicon.ico
+    expected-status: 200/204/301/302
+    interval: 300
+    timeout: 4000
+    lazy: false
+    max-failed-times: 1
+
+  - name: PROXY
+    type: select
+    proxies:
+      - AUTO
+      - DIRECT
+
+rules:
+  - MATCH,AUTO

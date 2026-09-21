@@ -1,8 +1,13 @@
-# Candidate B — AUTO is a single url-test over sub1+sub2+sub3 (no FAST/BACKUP split).
-# Region exclude-filter is milder than candidate A. Edit freely; keep AUTO and the placeholders.
+# Candidate: sequential fallback over all live subscriptions (sub1…sub5).
+# Schema only: subscription URLs and API secret come from bench .env
+# (${SUB1_URL} … ${SUB8_URL}, ${MIHOMO_API_SECRET}) via entrypoint envsubst.
+# Do not publish mixed-port / API. Alias is proxy-fallback, never proxy.
+#
+# AUTO = fallback(sub3, sub1, sub2, sub4, sub5). First alive node wins; no latency pick.
+# Order: prod FAST provider first, then BACKUP, then whitelist as last resort.
 # Providers use SUBSCRIBE: DIRECT first, AUTO if GitHub is blocked.
 # Do not point providers at AUTO alone — deadlock when the tunnel is down.
-# Placeholders ${SUB1_URL}…${SUB8_URL} and ${MIHOMO_API_SECRET} are required by the image entrypoint.
+# Cached provider YAML still works if both DIRECT and AUTO fail.
 
 mixed-port: 11808
 bind-address: "*"
@@ -239,18 +244,18 @@ proxy-providers:
 proxy-groups:
   # Real Bot API: GET /bot is 404 JSON. 200/301/302 matches DPI redirects.
   # Provider health-checks still use gstatic for general liveness.
-  # sub4/sub5 are whitelist — they look fast on Google/DPI and cannot carry
-  # Bot API; keep them off the bot path.
+  # Sequential failover: first provider with a live node carries Bot API.
   - name: AUTO
-    type: url-test
+    type: fallback
     use:
+      - sub3
       - sub1
       - sub2
-      - sub3
+      - sub4
+      - sub5
     url: https://api.telegram.org/bot
-    interval: 45
+    interval: 30
     timeout: 4000
-    tolerance: 150
     lazy: false
     max-failed-times: 1
     expected-status: 404
@@ -270,17 +275,10 @@ proxy-groups:
     lazy: false
     max-failed-times: 1
 
-  - name: WHITELIST
-    type: select
-    use:
-      - sub4
-      - sub5
-
   - name: PROXY
     type: select
     proxies:
       - AUTO
-      - WHITELIST
       - DIRECT
 
 rules:

@@ -27,8 +27,14 @@ cp .env.example .env
 
 Yaml-кандидаты: имя файла без `.yaml` = id.
 
-- `configs/eu.yaml` — кандидат A → контейнер `mihomo-bench-eu`, алиас `proxy-eu`
-- `configs/asia.yaml` — кандидат B → `mihomo-bench-asia`, `proxy-asia`
+- `configs/prod.yaml` — текущая прод-схема → `mihomo-bench-prod`, `proxy-prod`
+- `configs/urltest.yaml` — все подписки (sub1…sub5) в одном `url-test` AUTO → `proxy-urltest`
+- `configs/botpath.yaml` — `url-test` только sub1+sub2+sub3, whitelist вне MATCH,AUTO → `proxy-botpath`
+- `configs/fallback.yaml` — `fallback` sub3→sub1→sub2→sub4→sub5 → `proxy-fallback`
+- `configs/loadbalance.yaml` — `load-balance` round-robin по sub1…sub5 → `proxy-loadbalance`
+- `configs/noregion.yaml` — как прод, но FAST без регионального фильтра → `proxy-noregion`
+- `configs/layered.yaml` — FAST url-test(sub3) → BACKUP url-test(sub1+sub2) → LAST fallback(sub4+sub5) → `proxy-layered`
+- `configs/sub1.yaml` … `configs/sub5.yaml` — изолированная подписка: `AUTO = url-test` только этой sub → `proxy-sub1` … `proxy-sub5`. Вердикт по этим пяти id отвечает, какая подписка лучше несёт Bot API.
 
 Можно добавить сколько угодно `configs/*.yaml`. Алиас никогда не `proxy`. Порты на хост не публикуются. В шаблоне обязательны плейсхолдеры `${SUB1_URL}` … `${SUB8_URL}` и `${MIHOMO_API_SECRET}` (иначе entrypoint не стартует), `mixed-port: 11808`, `external-controller: 0.0.0.0:19090`, группа `AUTO`.
 
@@ -48,7 +54,7 @@ Long polling, портов на хост нет. Чужие чаты игнор�
 
 Фон ~каждые 15 с: curl через SOCKS кандидата на `https://api.telegram.org/bot` (успех = HTTP 404, как url-test mihomo) и `GET /proxies/AUTO` на API кандидата. JSONL: `results/probes.jsonl`.
 
-`/start`, `/status` и `/summary` открывают одну панель, как «🖴 Аптайм» в [daily-stats](https://github.com/mamonaronov/daily-stats): то же сообщение, кнопки периодов (5 мин … всё время), виды «Сводка» / «Ноды» / конкретный yaml. Сводка сама считает, какая схема лучше и по каким осям: надёжность, таймауты, скорость p50, хвост p95/p99, разброс, смена ноды, длинный простой — плюс рекомендация для ботов. «↻ Обновить» пересчитывает окно.
+`/start`, `/status` и `/summary` открывают одну панель, как «🖴 Аптайм» в [daily-stats](https://github.com/mamonaronov/daily-stats): то же сообщение, кнопки периодов (5 мин … всё время), виды «Сводка» / «Ноды» / конкретный yaml. Сводка сама считает, какой кандидат лучше и по каким осям: надёжность, таймауты, скорость p50, хвост p95/p99, разброс, смена ноды, длинный простой — плюс рекомендация для ботов. «↻ Обновить» пересчитывает окно. Чтобы сравнить подписки, жми `sub1`…`sub5`; общая сводка смешивает схемы и изолированные sub.
 
 ## Холодный кэш и deadlock
 
