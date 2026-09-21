@@ -19,8 +19,9 @@ from urllib.parse import quote
 
 import httpx
 
-PROBE_INTERVAL_SEC = 15
+PROBE_INTERVAL_SEC = 5
 CURL_MAX_TIME_SEC = 8
+PROBE_WAIT_SEC = CURL_MAX_TIME_SEC + 2
 TELEGRAM_POLL_TIMEOUT = 50
 GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Relay"}
 SUCCESS_HTTP = 404
@@ -302,16 +303,30 @@ async def selected_node(client: httpx.AsyncClient, instance_id: str, secret: str
     return current
 
 
+def probe_fail_record(instance_id: str, ts: str, error: str) -> dict[str, Any]:
+    return {
+        "ts": ts,
+        "id": instance_id,
+        "ok": False,
+        "http_status": None,
+        "latency_ms": None,
+        "selected": None,
+        "error": error[:240],
+    }
+
+
 async def probe_one(
     api_client: httpx.AsyncClient,
     instance_id: str,
     secret: str,
+    ts: str,
 ) -> dict[str, Any]:
-    socks_task = asyncio.create_task(probe_socks(instance_id))
-    selected_task = asyncio.create_task(selected_node(api_client, instance_id, secret))
-    socks, selected = await asyncio.gather(socks_task, selected_task)
+    socks, selected = await asyncio.gather(
+        probe_socks(instance_id),
+        selected_node(api_client, instance_id, secret),
+    )
     return {
-        "ts": now_iso(),
+        "ts": ts,
         "id": instance_id,
         "ok": bool(socks["ok"]),
         "http_status": socks["http_status"],
@@ -321,32 +336,61 @@ async def probe_one(
     }
 
 
+async def record_probe(
+    store: Store,
+    api_client: httpx.AsyncClient,
+    instance_id: str,
+    secret: str,
+) -> None:
+    ts = now_iso()
+    try:
+        record = await asyncio.wait_for(
+            probe_one(api_client, instance_id, secret, ts),
+            timeout=PROBE_WAIT_SEC,
+        )
+    except asyncio.TimeoutError:
+        record = probe_fail_record(instance_id, ts, "timeout")
+    except Exception as exc:  # noqa: BLE001
+        record = probe_fail_record(instance_id, ts, str(exc))
+    await store.append(record)
+
+
+def _discard_probe_task(inflight: set[asyncio.Task[None]], task: asyncio.Task[None]) -> None:
+    inflight.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(f"probe task failed: {exc}", file=sys.stderr)
+
+
+async def probe_instance_loop(
+    store: Store,
+    instance_id: str,
+    secret: str,
+    api_client: httpx.AsyncClient,
+    inflight: set[asyncio.Task[None]],
+) -> None:
+    while True:
+        task = asyncio.create_task(record_probe(store, api_client, instance_id, secret))
+        inflight.add(task)
+        task.add_done_callback(lambda done: _discard_probe_task(inflight, done))
+        await asyncio.sleep(PROBE_INTERVAL_SEC)
+
+
 async def probe_loop(
     store: Store,
     ids: list[str],
     secret: str,
     api_client: httpx.AsyncClient,
 ) -> None:
-    while True:
-        results = await asyncio.gather(
-            *(probe_one(api_client, instance_id, secret) for instance_id in ids),
-            return_exceptions=True,
+    inflight: set[asyncio.Task[None]] = set()
+    await asyncio.gather(
+        *(
+            probe_instance_loop(store, instance_id, secret, api_client, inflight)
+            for instance_id in ids
         )
-        for instance_id, result in zip(ids, results):
-            if isinstance(result, Exception):
-                record = {
-                    "ts": now_iso(),
-                    "id": instance_id,
-                    "ok": False,
-                    "http_status": None,
-                    "latency_ms": None,
-                    "selected": None,
-                    "error": str(result),
-                }
-            else:
-                record = result
-            await store.append(record)
-        await asyncio.sleep(PROBE_INTERVAL_SEC)
+    )
 
 
 def window_cutoff(period: str, now: datetime | None = None) -> datetime | None:
