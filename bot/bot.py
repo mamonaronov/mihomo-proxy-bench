@@ -29,6 +29,8 @@ TELEGRAM_POLL_TIMEOUT = 50
 GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Relay"}
 SUCCESS_HTTP = 404
 TELEGRAM_TEXT_LIMIT = 4000
+# Typical phone bubble wraps past this, so summary lines stay inside it.
+PHONE_LINE = 32
 
 PERIODS: dict[str, tuple[timedelta | None, str]] = {
     "5m": (timedelta(minutes=5), "последние 5 минут"),
@@ -168,19 +170,58 @@ def seconds_human(seconds: int | float | None) -> str:
     return " ".join(parts)
 
 
-def colon_block(rows: list[tuple[str, str]]) -> str:
-    if not rows:
-        return ""
-    width = max(len(label) for label, _ in rows)
-    return "\n".join(f"{label.rjust(width)}: {value}" for label, value in rows)
+def wrap_plain(text: str, width: int = PHONE_LINE) -> list[str]:
+    words = text.split()
+    if not words:
+        return [text] if text else []
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}"
+    lines.append(current)
+    return lines
 
 
-def pre_html(text: str) -> str:
-    return f"<pre>{html.escape(text)}</pre>"
+def flow_lines(prefix: str, items: list[str], width: int = PHONE_LINE, sep: str = ", ") -> list[str]:
+    if not items:
+        return []
+    lines: list[str] = []
+    current = prefix
+    for item in items:
+        joiner = "" if current in {prefix, ""} else sep
+        if current and len(current) + len(joiner) + len(item) > width:
+            ended = current.rstrip()
+            if joiner == ", ":
+                ended += ","
+            lines.append(ended)
+            current = item
+        else:
+            current = f"{current}{joiner}{item}"
+    if current:
+        lines.append(current.rstrip())
+    return lines
 
 
-def kv_pre(rows: list[tuple[str, str]]) -> str:
-    return pre_html(colon_block(rows))
+def kv_html(rows: list[tuple[str, str]]) -> str:
+    """Label/value lines that stay readable when a phone wraps the bubble."""
+    lines: list[str] = []
+    for label, value in rows:
+        one = f"{label}: {value}"
+        if len(one) <= PHONE_LINE:
+            lines.append(f"<b>{html.escape(label)}</b>: {html.escape(value)}")
+            continue
+        lines.append(f"<b>{html.escape(label)}</b>")
+        lines.extend(html.escape(part) for part in wrap_plain(value))
+    return "\n".join(lines)
+
+
+def split_pipe(text: str) -> list[str]:
+    parts = [part.strip() for part in text.split("|")]
+    return [part for part in parts if part] or ["—"]
 
 
 def selected_label(text: str, on: bool) -> str:
@@ -679,13 +720,12 @@ def _fmt_sigma(value: float | None) -> str:
     return f"σ {int(round(value))} мс"
 
 
-def _others(stats: list[dict[str, Any]], winner_id: str, fmt) -> str:
-    parts = []
-    for item in stats:
-        if item["id"] == winner_id:
-            continue
-        parts.append(f"{item['id']} {fmt(item)}")
-    return " · ".join(parts)
+def _norm_metric(value: Any, key: str) -> Any:
+    if isinstance(value, float) and key in {"p50", "p95", "p99", "avg", "stdev"}:
+        return round(value, 1)
+    if isinstance(value, float) and key in {"success", "timeout_rate"}:
+        return round(value, 4)
+    return value
 
 
 def _pick_dimension(
@@ -694,190 +734,270 @@ def _pick_dimension(
     *,
     higher: bool,
     fmt,
+    weight: int,
 ) -> dict[str, Any]:
     scored = [(item, item.get(key)) for item in stats if item.get(key) is not None]
+    missing = [item for item in stats if item.get(key) is None]
     if not scored:
-        return {"winner": None, "loser": None, "tied": True, "text": "нет данных"}
+        return {
+            "winner": None,
+            "loser": None,
+            "tied": False,
+            "tied_ids": [],
+            "order": [(str(item["id"]), "—") for item in missing],
+            "points": {},
+        }
 
-    def norm(value: Any) -> Any:
-        if isinstance(value, float) and key in {"p50", "p95", "p99", "avg", "stdev"}:
-            return round(value, 1)
-        if isinstance(value, float) and key in {"success", "timeout_rate"}:
-            return round(value, 4)
-        return value
+    def sort_key(pair: tuple[dict[str, Any], Any]) -> tuple[float, str]:
+        number = _norm_metric(pair[1], key)
+        primary = float(number) if isinstance(number, (int, float)) else 0.0
+        if higher:
+            primary = -primary
+        return (primary, str(pair[0]["id"]))
 
-    ranked = sorted(scored, key=lambda pair: norm(pair[1]), reverse=higher)
+    ranked = sorted(scored, key=sort_key)
 
     def unique_edge(index: int) -> str | None:
         if len(ranked) < 2:
             return None
-        edge = norm(ranked[index][1])
-        tied_edge = [item for item, value in ranked if norm(value) == edge]
+        edge = _norm_metric(ranked[index][1], key)
+        tied_edge = [item for item, value in ranked if _norm_metric(value, key) == edge]
         if len(tied_edge) != 1:
             return None
         return str(ranked[index][0]["id"])
 
     loser = unique_edge(-1)
     best_item, best = ranked[0]
-    best_n = norm(best)
-    tied = [item for item, value in ranked if norm(value) == best_n]
-    if len(tied) > 1:
-        names = ", ".join(str(item["id"]) for item in tied)
-        return {
-            "winner": None,
-            "loser": loser,
-            "tied": True,
-            "text": f"ничья {names}  ({fmt(best_item)})",
-        }
-    rest = _others(stats, str(best_item["id"]), fmt)
-    detail = f"{best_item['id']}  {fmt(best_item)}"
-    if rest:
-        detail = f"{detail} · {rest}"
-    return {"winner": str(best_item["id"]), "loser": loser, "tied": False, "text": detail}
+    best_n = _norm_metric(best, key)
+    tied = [item for item, value in ranked if _norm_metric(value, key) == best_n]
+    tied_ids = [str(item["id"]) for item in tied] if len(tied) > 1 else []
+    winner = None if tied_ids else str(best_item["id"])
+
+    n = len(ranked)
+    points: dict[str, float] = {}
+    index = 0
+    while index < n:
+        edge = _norm_metric(ranked[index][1], key)
+        end = index + 1
+        while end < n and _norm_metric(ranked[end][1], key) == edge:
+            end += 1
+        share = sum((n - 1 - pos) * weight for pos in range(index, end)) / (end - index)
+        for pos in range(index, end):
+            points[str(ranked[pos][0]["id"])] = share
+        index = end
+
+    order = [(str(item["id"]), fmt(item)) for item, _value in ranked]
+    order.extend((str(item["id"]), "—") for item in missing)
+    return {
+        "winner": winner,
+        "loser": loser,
+        "tied": bool(tied_ids),
+        "tied_ids": tied_ids,
+        "order": order,
+        "points": points,
+    }
+
+
+def _rank_instances(usable: list[dict[str, Any]], totals: dict[str, float]) -> list[str]:
+    """Higher success first. Inside the same displayed percent, weighted ranks break the tie."""
+
+    def key(item: dict[str, Any]) -> tuple[float, float, float, str]:
+        success = item.get("success")
+        if isinstance(success, (int, float)):
+            shown = round(float(success) * 1000)
+            exact = float(success)
+        else:
+            shown = -1
+            exact = -1.0
+        return (-shown, -totals.get(str(item["id"]), 0.0), -exact, str(item["id"]))
+
+    return [str(item["id"]) for item in sorted(usable, key=key)]
+
+
+def _lead_tie(ranked: list[str], by_id: dict[str, dict[str, Any]], totals: dict[str, float]) -> list[str]:
+    if not ranked:
+        return []
+    lead = ranked[0]
+    tied = [lead]
+    lead_item = by_id[lead]
+    for other in ranked[1:]:
+        item = by_id[other]
+        same_score = abs(totals.get(lead, 0.0) - totals.get(other, 0.0)) < 1e-9
+        both = isinstance(lead_item.get("success"), (int, float)) and isinstance(item.get("success"), (int, float))
+        same_success = both and abs(float(lead_item["success"]) - float(item["success"])) < 1e-12
+        if same_score and same_success:
+            tied.append(other)
+            continue
+        break
+    return tied
 
 
 def compare_stats(stats: list[dict[str, Any]]) -> dict[str, Any] | None:
     usable = [item for item in stats if item.get("n")]
     if len(usable) < 2:
         return None
-    dimensions = [
-        (
-            "Надёжность",
-            _pick_dimension(usable, "success", higher=True, fmt=lambda s: _fmt_success(s.get("success"))),
-            5,
-        ),
-        (
-            "Таймауты",
-            _pick_dimension(usable, "timeout_rate", higher=False, fmt=lambda s: _fmt_success(s.get("timeout_rate"))),
-            3,
-        ),
-        (
-            "Скорость p50",
-            _pick_dimension(usable, "p50", higher=False, fmt=lambda s: fmt_ms(s.get("p50"))),
-            2,
-        ),
-        (
-            "Хвост p95",
-            _pick_dimension(usable, "p95", higher=False, fmt=lambda s: fmt_ms(s.get("p95"))),
-            3,
-        ),
-        (
-            "Хвост p99",
-            _pick_dimension(usable, "p99", higher=False, fmt=lambda s: fmt_ms(s.get("p99"))),
-            2,
-        ),
-        (
-            "Разброс",
-            _pick_dimension(usable, "stdev", higher=False, fmt=lambda s: _fmt_sigma(s.get("stdev"))),
-            1,
-        ),
-        (
-            "Смена ноды",
-            _pick_dimension(usable, "node_switches", higher=False, fmt=lambda s: str(int(s.get("node_switches") or 0))),
-            1,
-        ),
-        (
-            "Длинный простой",
-            _pick_dimension(usable, "fail_streak", higher=False, fmt=lambda s: f"{int(s.get('fail_streak') or 0)} проб"),
-            2,
-        ),
+    specs = [
+        ("Надёжность", "success", True, lambda s: _fmt_success(s.get("success")), 5),
+        ("Таймауты", "timeout_rate", False, lambda s: _fmt_success(s.get("timeout_rate")), 3),
+        ("Скорость p50", "p50", False, lambda s: fmt_ms(s.get("p50")), 2),
+        ("Хвост p95", "p95", False, lambda s: fmt_ms(s.get("p95")), 3),
+        ("Хвост p99", "p99", False, lambda s: fmt_ms(s.get("p99")), 2),
+        ("Разброс", "stdev", False, lambda s: _fmt_sigma(s.get("stdev")), 1),
+        ("Смена ноды", "node_switches", False, lambda s: str(int(s.get("node_switches") or 0)), 1),
+        ("Длинный простой", "fail_streak", False, lambda s: f"{int(s.get('fail_streak') or 0)} проб", 2),
     ]
-    scores: dict[str, float] = {str(item["id"]): 0.0 for item in usable}
-    bad_scores: dict[str, float] = {str(item["id"]): 0.0 for item in usable}
-    for _name, result, weight in dimensions:
-        winner = result["winner"]
-        if winner:
-            scores[winner] += weight
-        loser = result["loser"]
-        if loser:
-            bad_scores[loser] += weight
-    by_success = sorted(
-        [item for item in usable if item.get("success") is not None],
-        key=lambda item: (-float(item["success"]), item["id"]),
-    )
-    overall = None
-    if len(by_success) >= 2:
-        lead, runner = by_success[0], by_success[1]
-        if float(lead["success"]) - float(runner["success"]) >= 0.005:
-            overall = str(lead["id"])
-    if overall is None:
-        ranked_ids = sorted(scores, key=lambda instance_id: (-scores[instance_id], instance_id))
-        best = ranked_ids[0]
-        second = ranked_ids[1] if len(ranked_ids) > 1 else None
-        overall = None if second is not None and scores[best] == scores[second] else best
-    pool = {item_id: score for item_id, score in bad_scores.items() if item_id != overall}
-    ranked_bad = sorted(pool, key=lambda instance_id: (-pool[instance_id], instance_id))
-    exclude = None
-    if ranked_bad and pool[ranked_bad[0]] > 0:
-        worst = ranked_bad[0]
-        second_bad = ranked_bad[1] if len(ranked_bad) > 1 else None
-        if second_bad is None or pool[worst] != pool[second_bad]:
-            exclude = worst
-    wins = [name for name, result, _w in dimensions if result["winner"] == overall]
-    losses = [
-        f"{name} ({result['winner']})"
-        for name, result, _w in dimensions
-        if overall and result["winner"] and result["winner"] != overall
-    ]
-    exclude_worse = [name for name, result, _w in dimensions if exclude and result["loser"] == exclude]
-    exclude_better = [name for name, result, _w in dimensions if exclude and result["winner"] == exclude]
+    dimensions: list[tuple[str, dict[str, Any]]] = []
+    totals = {str(item["id"]): 0.0 for item in usable}
+    for name, key, higher, fmt, weight in specs:
+        result = _pick_dimension(usable, key, higher=higher, fmt=fmt, weight=weight)
+        for instance_id, points in result["points"].items():
+            totals[instance_id] += points
+        dimensions.append((name, result))
+    ranked = _rank_instances(usable, totals)
+    by_id = {str(item["id"]): item for item in usable}
+    missing = [str(item["id"]) for item in stats if not item.get("n")]
     return {
-        "overall": overall,
-        "exclude": exclude,
-        "scores": scores,
-        "bad_scores": bad_scores,
-        "dimensions": [(name, result) for name, result, _w in dimensions],
-        "wins": wins,
-        "losses": losses,
-        "exclude_worse": exclude_worse,
-        "exclude_better": exclude_better,
+        "ranked": ranked,
+        "missing": missing,
+        "lead_tie": _lead_tie(ranked, by_id, totals),
+        "dimensions": dimensions,
+        "scores": totals,
     }
 
 
-def verdict_block(stats: list[dict[str, Any]]) -> list[str]:
+def _loss_groups(instance_id: str, dimensions: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, list[str]]]:
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for name, result in dimensions:
+        winner = result.get("winner")
+        if winner and winner != instance_id:
+            key = str(winner)
+        elif result.get("tied") and instance_id not in (result.get("tied_ids") or []):
+            key = ", ".join(result.get("tied_ids") or [])
+        else:
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(name)
+    return [(key, groups[key]) for key in order]
+
+
+def _prefixed_items(prefix: str, items: list[str]) -> list[str]:
+    if not items:
+        return wrap_plain(prefix) if prefix else []
+    if len(prefix) + len(items[0]) <= PHONE_LINE:
+        return flow_lines(prefix, items)
+    return [*wrap_plain(prefix.rstrip()), *flow_lines("", items)]
+
+
+def _advice_lines(instance_id: str, dimensions: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    wins = [name for name, result in dimensions if result.get("winner") == instance_id]
+    worse = [name for name, result in dimensions if result.get("loser") == instance_id]
+    lines: list[str] = []
+    if wins:
+        lines.extend(_prefixed_items("лучше по: ", wins))
+    for winner, names in _loss_groups(instance_id, dimensions):
+        # Who tied for the lead is listed once above the ranking.
+        if "," in winner:
+            continue
+        lines.extend(_prefixed_items(f"уступает {winner}: ", names))
+    if worse:
+        lines.extend(_prefixed_items("хуже всех по: ", worse))
+    if not lines:
+        lines.append("без явного перевеса")
+    return [html.escape(line) for line in lines]
+
+
+def _advice_note(instance_id: str, dimensions: list[tuple[str, dict[str, Any]]]) -> str | None:
+    wins = {name for name, result in dimensions if result.get("winner") == instance_id}
+    if "Надёжность" in wins:
+        return "Для Telegram-ботов надёжность важнее сырой скорости."
+    speed = {"Скорость p50", "Хвост p95", "Хвост p99"}
+    if not wins & speed:
+        return None
+    for name, result in dimensions:
+        if name == "Надёжность" and result.get("winner") not in {None, instance_id}:
+            return "Быстрее по задержкам, но чаще теряет Bot API."
+    return None
+
+
+def _stat_lines(item: dict[str, Any]) -> list[str]:
+    n = int(item["n"])
+    success = fmt_pct(int(item["ok"]), n) if n else "—"
+    latency = f"p50 {fmt_ms(item.get('p50'))} · p95 {fmt_ms(item.get('p95'))}"
+    lines = [f"{success} · таймауты {_fmt_success(item.get('timeout_rate'))}"]
+    if len(latency) <= PHONE_LINE:
+        lines.append(latency)
+    else:
+        lines.append(f"p50 {fmt_ms(item.get('p50'))}")
+        lines.append(f"p95 {fmt_ms(item.get('p95'))}")
+    lines.append(f"простой {int(item.get('fail_streak') or 0)}")
+    return lines
+
+
+def _recommendation_card(
+    index: int,
+    item: dict[str, Any],
+    dimensions: list[tuple[str, dict[str, Any]]],
+) -> str:
+    instance_id = str(item["id"])
+    lines = [f"<b>{index}. {html.escape(instance_id)}</b>"]
+    lines.extend(html.escape(line) for line in _stat_lines(item))
+    lines.extend(_advice_lines(instance_id, dimensions))
+    note = _advice_note(instance_id, dimensions)
+    if note:
+        lines.extend(html.escape(part) for part in wrap_plain(note))
+    return "\n".join(lines)
+
+
+def _metric_block(name: str, result: dict[str, Any]) -> str:
+    lines = [f"<b>{html.escape(name)}</b>"]
+    if result.get("tied"):
+        lines.append("ничья")
+    for instance_id, value in result["order"]:
+        lines.append(f"{html.escape(str(instance_id))} · {html.escape(str(value))}")
+    return "\n".join(lines)
+
+
+def verdict_parts(stats: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Ranking lines, then one paragraph per metric (dropped first if the message is long)."""
     verdict = compare_stats(stats)
     if verdict is None:
-        return []
-    rows = [(name, result["text"]) for name, result in verdict["dimensions"]]
-    lines = ["<b>Что лучше</b>", kv_pre(rows), ""]
-    overall = verdict["overall"]
-    if overall is None:
-        lines.append("Рекомендация: ничья — смотри параметры выше.")
-    else:
-        text = f"<b>Рекомендация:</b> <code>{html.escape(overall)}</code>"
-        wins = verdict["wins"]
-        losses = verdict["losses"]
-        bits: list[str] = []
-        if wins:
-            bits.append("лучше по: " + ", ".join(wins))
-        if losses:
-            bits.append("уступает по: " + ", ".join(losses))
-        if bits:
-            text += " — " + "; ".join(bits) + "."
-        else:
-            text += "."
-        if any(name == "Надёжность" for name in wins):
-            text += " Для Telegram-ботов надёжность важнее сырой скорости."
-        elif any(name == "Надёжность" and result["winner"] not in {None, overall} for name, result in verdict["dimensions"]):
-            text += " Быстрее по отдельным задержкам, но чаще теряет Bot API — для прода обычно хуже."
-        lines.append(text)
-    exclude = verdict.get("exclude")
-    if exclude:
-        drop = f"<b>Исключить:</b> <code>{html.escape(str(exclude))}</code>"
-        drop_bits: list[str] = []
-        worse = verdict.get("exclude_worse") or []
-        better = verdict.get("exclude_better") or []
-        if worse:
-            drop_bits.append("хуже по: " + ", ".join(worse))
-        if better:
-            drop_bits.append("лучше по: " + ", ".join(better))
-        if drop_bits:
-            drop += " — " + "; ".join(drop_bits) + "."
-        else:
-            drop += "."
-        drop += " Лучше убрать из сравнения."
-        lines.append(drop)
-    return lines
+        return [], []
+    dimensions: list[tuple[str, dict[str, Any]]] = verdict["dimensions"]
+    lines = ["<b>Рекомендации</b>"]
+    lead = verdict["lead_tie"]
+    if len(lead) > 1:
+        lines.append("")
+        lines.extend(html.escape(part) for part in flow_lines("Вровень: ", lead))
+    for name, result in dimensions:
+        if result.get("tied"):
+            lines.append("")
+            lines.extend(
+                html.escape(part) for part in flow_lines(f"ничья {name}: ", result.get("tied_ids") or [])
+            )
+    by_id = {str(item["id"]): item for item in stats}
+    index = 1
+    for instance_id in verdict["ranked"]:
+        lines.append("")
+        lines.append(_recommendation_card(index, by_id[instance_id], dimensions))
+        index += 1
+    for instance_id in verdict["missing"]:
+        lines.append("")
+        lines.append(f"<b>{index}. {html.escape(instance_id)}</b>\nнет проб за этот период")
+        index += 1
+    metrics = [_metric_block(name, result) for name, result in dimensions]
+    return lines, metrics
+
+
+def _append_fitting(lines: list[str], blocks: list[str], limit: int) -> None:
+    """Add whole blocks until one no longer fits. Later blocks are not tried."""
+    for block in blocks:
+        candidate = "\n".join([*lines, "", block])
+        if len(candidate) > limit:
+            return
+        lines.extend(["", block])
 
 
 def cb_data(period: str, view: str, instance_id: str | None = None) -> str:
@@ -932,21 +1052,36 @@ def stats_keyboard(period: str, view: str, ids: list[str], instance_id: str | No
     return {"inline_keyboard": rows}
 
 
-def last_probe_rows(latest: dict[str, dict[str, Any] | None], ids: list[str]) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
-    for instance_id in ids:
-        record = latest[instance_id]
-        if record is None:
-            rows.append((instance_id, "нет проб"))
-            continue
-        flag = "ok" if record.get("ok") else "fail"
-        http_status = record.get("http_status")
-        http_s = str(http_status) if http_status is not None else "—"
-        ms = record.get("latency_ms") if isinstance(record.get("latency_ms"), (int, float)) else None
-        ts = parse_ts(str(record.get("ts") or ""))
-        ago = seconds_human((now_utc() - ts).total_seconds()) if ts else "—"
-        rows.append((instance_id, f"{flag}  {fmt_ms(ms)}  http {http_s}  {ago} назад"))
-    return rows
+def probe_card(instance_id: str, record: dict[str, Any] | None) -> str:
+    if record is None:
+        return f"<b>{html.escape(instance_id)}</b>\nнет проб"
+    ok = bool(record.get("ok"))
+    flag = "ok" if ok else "fail"
+    ms = record.get("latency_ms") if isinstance(record.get("latency_ms"), (int, float)) else None
+    ts = parse_ts(str(record.get("ts") or ""))
+    ago = seconds_human((now_utc() - ts).total_seconds()) if ts else "—"
+    lines = [f"<b>{html.escape(instance_id)}</b> · {flag}"]
+    timing = f"{fmt_ms(ms)} · {ago} назад"
+    if len(timing) <= PHONE_LINE:
+        lines.append(html.escape(timing))
+    else:
+        lines.append(html.escape(fmt_ms(ms)))
+        lines.append(html.escape(f"{ago} назад"))
+    parts = split_pipe(str(record.get("selected") or "—"))
+    head = f"нода {parts[0]}"
+    if len(head) <= PHONE_LINE:
+        lines.append(html.escape(head))
+    else:
+        lines.append("нода")
+        lines.extend(html.escape(line) for line in wrap_plain(parts[0]))
+    for part in parts[1:]:
+        lines.extend(html.escape(line) for line in wrap_plain(part))
+    err = record.get("error")
+    if err and not ok:
+        err_s = str(err).strip()
+        if err_s and err_s not in str(record.get("selected") or ""):
+            lines.extend(html.escape(line) for line in wrap_plain(err_s))
+    return "\n".join(lines)
 
 
 def stats_table(item: dict[str, Any], expected: int) -> list[str]:
@@ -968,17 +1103,20 @@ def stats_table(item: dict[str, Any], expected: int) -> list[str]:
         ("Смена ноды", str(int(item.get("node_switches") or 0))),
         ("Длинный простой", f"{int(item.get('fail_streak') or 0)} проб"),
     ]
-    return [kv_pre(rows)]
+    return [kv_html(rows)]
 
 
-def compact_row(item: dict[str, Any]) -> tuple[str, str]:
+def compact_card(item: dict[str, Any]) -> str:
+    instance_id = html.escape(str(item["id"]))
     n = int(item["n"])
     if n == 0:
-        return (str(item["id"]), "нет проб")
-    success = fmt_pct(int(item["ok"]), n)
-    return (
-        str(item["id"]),
-        f"{success}  p50 {fmt_ms(item['p50'])}  таймауты {item['timeouts']}",
+        return f"<b>{instance_id}</b>\nнет проб"
+    success = html.escape(fmt_pct(int(item["ok"]), n))
+    return "\n".join(
+        [
+            f"<b>{instance_id}</b> · {success}",
+            f"p50 {html.escape(fmt_ms(item['p50']))} · таймауты {int(item['timeouts'])}",
+        ]
     )
 
 
@@ -1033,10 +1171,8 @@ def bucket_block(item: dict[str, Any], expected: int) -> list[str]:
         (label, f"{seconds_human(count * PROBE_INTERVAL_SEC)} ({fmt_pct(count, total)})")
         for label, count in rows
     ]
-    return [
-        f"Время в диапазонах (тик {PROBE_INTERVAL_SEC} с, должно быть {expected or total} зам.):",
-        kv_pre(table),
-    ]
+    intro = f"Время в диапазонах (тик {PROBE_INTERVAL_SEC} с, должно быть {expected or total} зам.):"
+    return [*wrap_plain(intro), kv_html(table)]
 
 
 def node_lines(rows: list[dict[str, Any]]) -> list[str]:
@@ -1046,35 +1182,38 @@ def node_lines(rows: list[dict[str, Any]]) -> list[str]:
     for i, row in enumerate(rows):
         if i:
             lines.append("")
-        lines.append(f"• <code>{html.escape(str(row['name']))}</code>")
-        lines.append(
-            f"  {int(row['samples'])} раз, avg {fmt_ms(row['avg'])}, p95 {fmt_ms(row['p95'])}"
-        )
+        parts = split_pipe(str(row["name"]))
+        wrapped = wrap_plain(parts[0])
+        lines.append("• " + html.escape(wrapped[0]))
+        lines.extend(html.escape(line) for line in wrapped[1:])
+        for part in parts[1:]:
+            lines.extend(html.escape(line) for line in wrap_plain(part))
+        meta = f"{int(row['samples'])} раз · avg {fmt_ms(row['avg'])}"
+        tail = f"p95 {fmt_ms(row['p95'])}"
+        if len(meta) + 3 + len(tail) <= PHONE_LINE:
+            lines.append(f"{meta} · {tail}")
+        else:
+            lines.append(meta)
+            lines.append(tail)
     return lines
 
 
-def current_nodes(latest: dict[str, dict[str, Any] | None], ids: list[str]) -> list[str]:
-    lines: list[str] = []
-    for instance_id in ids:
-        record = latest[instance_id]
-        node = (record or {}).get("selected") or "—"
-        err = (record or {}).get("error")
-        extra = f" ({html.escape(str(err))})" if err and not (record or {}).get("ok") else ""
-        lines.append(f"{html.escape(instance_id)} · нода: <code>{html.escape(str(node))}</code>{extra}")
-    return lines
+def _labeled_line(label: str, value: str) -> list[str]:
+    if len(f"{label} · {value}") <= PHONE_LINE:
+        return [f"<b>{html.escape(label)}</b> · {html.escape(value)}"]
+    return [f"<b>{html.escape(label)}</b>", html.escape(value)]
 
 
-def header_block(ids: list[str]) -> str:
+def header_block(_ids: list[str]) -> str:
     commit, title = app_build_identity()
-    return kv_pre(
-        [
-            ("Аптайм бота", seconds_human(bot_uptime_seconds())),
-            ("Аптайм сервера", seconds_human(host_uptime_seconds())),
-            ("Коммит", f"{title} ({commit})"),
-            ("Интервал проб", f"{PROBE_INTERVAL_SEC} с"),
-            ("Кандидаты", ", ".join(ids)),
-        ]
-    )
+    lines: list[str] = []
+    lines.extend(_labeled_line("Аптайм бота", seconds_human(bot_uptime_seconds())))
+    lines.extend(_labeled_line("Аптайм сервера", seconds_human(host_uptime_seconds())))
+    lines.append("<b>Коммит</b>")
+    lines.extend(html.escape(part) for part in wrap_plain(title))
+    lines.append(f"<code>{html.escape(commit)}</code>")
+    lines.extend(_labeled_line("Интервал проб", f"{PROBE_INTERVAL_SEC} с"))
+    return "\n".join(lines)
 
 
 def render_stats(
@@ -1093,21 +1232,32 @@ def render_stats(
     stats = [summarize_id(records, item, cutoff) for item in focus]
 
     lines = ["🖴 <b>Сравнение схем Mihomo</b>", "", header_block(ids), "", "<b>Сейчас</b>"]
-    lines.append(kv_pre(last_probe_rows(latest, focus)))
-    lines.extend(current_nodes(latest, focus))
+    for item_id in focus:
+        lines.append("")
+        lines.append(probe_card(item_id, latest[item_id]))
     lines.extend(["", f"<b>За {title}</b>"])
+    showed_verdict = False
+    metric_blocks: list[str] = []
     if len(focus) > 1:
-        lines.extend(verdict_block(stats))
+        ranking_lines, metric_blocks = verdict_parts(stats)
+        if ranking_lines:
+            showed_verdict = True
+            lines.extend(ranking_lines)
 
+    optional: list[str] = []
     if view == "n":
         for item in focus:
-            lines.append("")
-            lines.append(f"<b>Топ нод · {html.escape(item)}</b>")
-            lines.extend(node_lines(top_nodes(records, item, cutoff)))
-    elif len(stats) > 1:
-        lines.append("")
-        lines.append(kv_pre([compact_row(item) for item in stats]))
-        lines.append("Полные цифры — кнопка схемы.")
+            body = "\n".join(node_lines(top_nodes(records, item, cutoff)))
+            optional.append(f"<b>Топ нод · {html.escape(item)}</b>\n{body}")
+    elif len(stats) > 1 and not showed_verdict:
+        optional.extend(compact_card(item) for item in stats)
+    if metric_blocks:
+        optional.append("<b>Что лучше</b>\n" + metric_blocks[0])
+        optional.extend(metric_blocks[1:])
+    if len(stats) != 1 or view == "n":
+        _append_fitting(lines, optional, TELEGRAM_TEXT_LIMIT)
+        if len(stats) > 1:
+            _append_fitting(lines, ["Полные цифры — кнопка схемы."], TELEGRAM_TEXT_LIMIT)
     else:
         for item in stats:
             expected = int(item.get("expected") or 0)

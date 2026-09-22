@@ -3,11 +3,11 @@
 # (${SUB1_URL} … ${SUB8_URL}, ${MIHOMO_API_SECRET}) via entrypoint envsubst.
 # Do not publish mixed-port / API. Alias is proxy-prod, never proxy.
 #
-# FAST = url-test(sub3). BACKUP = fallback(sub1,sub2). AUTO = fallback(FAST,BACKUP).
+# AUTO = url-test(sub1+sub2+sub3+sub4+sub5). No FAST/BACKUP split, no WHITELIST.
+# Region exclude is off — Anycast and expire rows only. Bot API health: HTTP 404.
 # Providers use SUBSCRIBE: DIRECT first, AUTO if GitHub is blocked.
 # Do not point providers at AUTO alone — deadlock when the tunnel is down.
 # Cached provider YAML still works if both DIRECT and AUTO fail.
-# sub4/sub5 are whitelist — keep them off the bot path (MATCH,AUTO only).
 
 mixed-port: 11808
 bind-address: "*"
@@ -244,12 +244,16 @@ proxy-providers:
 proxy-groups:
   # Real Bot API: GET /bot is 404 JSON. 200/301/302 matches DPI redirects.
   # Provider health-checks still use gstatic for general liveness.
-  # sub4/sub5 are whitelist — they look fast on Google/DPI and cannot carry
-  # Bot API; keep them off the bot path.
-  - name: FAST
+  # All live providers compete in AUTO; url-test should drop nodes that
+  # look fast on Google/DPI but cannot carry Bot API.
+  - name: AUTO
     type: url-test
     use:
+      - sub1
+      - sub2
       - sub3
+      - sub4
+      - sub5
     url: https://api.telegram.org/bot
     interval: 30
     timeout: 4000
@@ -257,32 +261,7 @@ proxy-groups:
     lazy: false
     max-failed-times: 1
     expected-status: 404
-    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅|Anycast|Singapore|Hong Kong|HongKong|Thailand|Bangkok|Canada|Korea|Japan|Australia|Brazil|India|United States|\\bUSA\\b|🇭🇰|🇸🇬|🇹🇭|🇨🇦|🇰🇷|🇯🇵|🇦🇺|🇧🇷|🇮🇳|🇺🇸"
-
-  - name: BACKUP
-    type: fallback
-    use:
-      - sub1
-      - sub2
-    url: https://api.telegram.org/bot
-    interval: 300
-    timeout: 4000
-    lazy: true
-    max-failed-times: 1
-    expected-status: 404
     exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅|Anycast"
-
-  - name: AUTO
-    type: fallback
-    proxies:
-      - FAST
-      - BACKUP
-    url: https://api.telegram.org/bot
-    interval: 30
-    timeout: 4000
-    lazy: false
-    max-failed-times: 1
-    expected-status: 404
 
   - name: SUBSCRIBE
     type: fallback
@@ -298,17 +277,10 @@ proxy-groups:
     lazy: false
     max-failed-times: 1
 
-  - name: WHITELIST
-    type: select
-    use:
-      - sub4
-      - sub5
-
   - name: PROXY
     type: select
     proxies:
       - AUTO
-      - WHITELIST
       - DIRECT
 
 rules:

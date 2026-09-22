@@ -32,7 +32,7 @@ Yaml-кандидаты: имя файла без `.yaml` = id.
 - `configs/botpath.yaml` — `url-test` только sub1+sub2+sub3, whitelist вне MATCH,AUTO → `proxy-botpath`
 - `configs/fallback.yaml` — `fallback` sub3→sub1→sub2→sub4→sub5 → `proxy-fallback`
 - `configs/loadbalance.yaml` — `load-balance` round-robin по sub1…sub5 → `proxy-loadbalance`
-- `configs/noregion.yaml` — как прод, но FAST без регионального фильтра → `proxy-noregion`
+- `configs/noregion.yaml` — прежняя схема FAST/BACKUP/AUTO без регионального фильтра FAST → `proxy-noregion`
 - `configs/layered.yaml` — FAST url-test(sub3) → BACKUP url-test(sub1+sub2) → LAST fallback(sub4+sub5) → `proxy-layered`
 - `configs/sub1.yaml` … `configs/sub5.yaml` — изолированная подписка: `AUTO = url-test` только этой sub → `proxy-sub1` … `proxy-sub5`. Вердикт по этим пяти id отвечает, какая подписка лучше несёт Bot API.
 
