@@ -333,26 +333,6 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_record(row) for row in rows]
 
-    async def latest(self, ids: list[str]) -> dict[str, dict[str, Any] | None]:
-        result: dict[str, dict[str, Any] | None] = {instance_id: None for instance_id in ids}
-        if not ids:
-            return result
-        async with self._lock:
-            for instance_id in ids:
-                row = self._conn.execute(
-                    """
-                    SELECT ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s
-                    FROM probes
-                    WHERE id = ?
-                    ORDER BY ts DESC, rowid DESC
-                    LIMIT 1
-                    """,
-                    (instance_id,),
-                ).fetchone()
-                if row is not None:
-                    result[instance_id] = self._row_to_record(row)
-        return result
-
 
 async def probe_socks(instance_id: str) -> dict[str, Any]:
     proxy = f"socks5h://proxy-{instance_id}:11808"
@@ -1052,38 +1032,6 @@ def stats_keyboard(period: str, view: str, ids: list[str], instance_id: str | No
     return {"inline_keyboard": rows}
 
 
-def probe_card(instance_id: str, record: dict[str, Any] | None) -> str:
-    if record is None:
-        return f"<b>{html.escape(instance_id)}</b>\nнет проб"
-    ok = bool(record.get("ok"))
-    flag = "ok" if ok else "fail"
-    ms = record.get("latency_ms") if isinstance(record.get("latency_ms"), (int, float)) else None
-    ts = parse_ts(str(record.get("ts") or ""))
-    ago = seconds_human((now_utc() - ts).total_seconds()) if ts else "—"
-    lines = [f"<b>{html.escape(instance_id)}</b> · {flag}"]
-    timing = f"{fmt_ms(ms)} · {ago} назад"
-    if len(timing) <= PHONE_LINE:
-        lines.append(html.escape(timing))
-    else:
-        lines.append(html.escape(fmt_ms(ms)))
-        lines.append(html.escape(f"{ago} назад"))
-    parts = split_pipe(str(record.get("selected") or "—"))
-    head = f"нода {parts[0]}"
-    if len(head) <= PHONE_LINE:
-        lines.append(html.escape(head))
-    else:
-        lines.append("нода")
-        lines.extend(html.escape(line) for line in wrap_plain(parts[0]))
-    for part in parts[1:]:
-        lines.extend(html.escape(line) for line in wrap_plain(part))
-    err = record.get("error")
-    if err and not ok:
-        err_s = str(err).strip()
-        if err_s and err_s not in str(record.get("selected") or ""):
-            lines.extend(html.escape(line) for line in wrap_plain(err_s))
-    return "\n".join(lines)
-
-
 def stats_table(item: dict[str, Any], expected: int) -> list[str]:
     n = int(item["n"])
     fail = int(item["fail"])
@@ -1218,7 +1166,6 @@ def header_block(_ids: list[str]) -> str:
 
 def render_stats(
     records: list[dict[str, Any]],
-    latest: dict[str, dict[str, Any] | None],
     ids: list[str],
     period: str,
     view: str,
@@ -1231,11 +1178,7 @@ def render_stats(
     focus = [instance_id] if view == "i" and instance_id in ids else ids
     stats = [summarize_id(records, item, cutoff) for item in focus]
 
-    lines = ["🖴 <b>Сравнение схем Mihomo</b>", "", header_block(ids), "", "<b>Сейчас</b>"]
-    for item_id in focus:
-        lines.append("")
-        lines.append(probe_card(item_id, latest[item_id]))
-    lines.extend(["", f"<b>За {title}</b>"])
+    lines = ["🖴 <b>Сравнение схем Mihomo</b>", "", header_block(ids), "", f"<b>За {title}</b>"]
     showed_verdict = False
     metric_blocks: list[str] = []
     if len(focus) > 1:
@@ -1351,7 +1294,7 @@ class Telegram:
             {
                 "commands": [
                     {"command": "start", "description": "Открыть сравнение схем"},
-                    {"command": "status", "description": "Сводка и последняя проба"},
+                    {"command": "status", "description": "Сводка за период"},
                     {"command": "summary", "description": "Статистика за выбранный период"},
                 ]
             },
@@ -1380,8 +1323,7 @@ async def show_panel(
     if period not in PERIODS:
         period = "1h"
     records = await store.fetch_since(ids, window_cutoff(period))
-    latest = await store.latest(ids)
-    text = render_stats(records, latest, ids, period, view, instance_id)
+    text = render_stats(records, ids, period, view, instance_id)
     markup = stats_keyboard(period, view, ids, instance_id)
     if message_id is not None:
         try:
