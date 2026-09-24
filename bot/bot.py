@@ -21,6 +21,7 @@ import httpx
 
 from app_version import app_build_identity
 from downtime import downtime_ticks
+from report_image import render_report_png
 
 PROBE_INTERVAL_SEC = 1
 CURL_MAX_TIME_SEC = 8
@@ -1028,7 +1029,12 @@ def stats_keyboard(period: str, view: str, ids: list[str], instance_id: str | No
             id_row = []
     if id_row:
         rows.append(id_row)
-    rows.append([{"text": "↻ Обновить", "callback_data": cb_data(period, view, instance_id)}])
+    rows.append(
+        [
+            {"text": "Картинка", "callback_data": f"pic:{period}"},
+            {"text": "↻ Обновить", "callback_data": cb_data(period, view, instance_id)},
+        ]
+    )
     return {"inline_keyboard": rows}
 
 
@@ -1164,6 +1170,161 @@ def header_block(_ids: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _advice_sentence(instance_id: str, dimensions: list[tuple[str, dict[str, Any]]]) -> str:
+    wins = [name for name, result in dimensions if result.get("winner") == instance_id]
+    worse = [name for name, result in dimensions if result.get("loser") == instance_id]
+    parts: list[str] = []
+    if wins:
+        parts.append("лучше по: " + ", ".join(wins))
+    for winner, names in _loss_groups(instance_id, dimensions):
+        if "," in winner:
+            continue
+        parts.append(f"уступает {winner}: " + ", ".join(names))
+    if worse:
+        parts.append("хуже всех по: " + ", ".join(worse))
+    return " · ".join(parts) if parts else "без явного перевеса"
+
+
+def _bucket_line(item: dict[str, Any]) -> str:
+    buckets: dict[str, int] = item["buckets"]
+    labels = [label for label, _lo, _hi in BUCKETS]
+    labels.extend(["timeout", "fail", "service_down", "server_off"])
+    names = {
+        "timeout": "Таймаут",
+        "fail": "Другой fail",
+        "service_down": "Сервис не запущен",
+        "server_off": "Сервер выключен",
+    }
+    observed = sum(int(buckets.get(label, 0)) for label in labels)
+    expected = int(item.get("expected") or 0)
+    total = max(expected, observed) if expected else observed
+    parts: list[str] = []
+    for label in labels:
+        count = int(buckets.get(label, 0))
+        title = names.get(label, label)
+        parts.append(f"{title} {seconds_human(count * PROBE_INTERVAL_SEC)} ({fmt_pct(count, total)})")
+    return " · ".join(parts)
+
+
+def _node_line(row: dict[str, Any]) -> str:
+    name = " · ".join(split_pipe(str(row["name"])))
+    return (
+        f"{name} — {int(row['samples'])} раз, "
+        f"avg {fmt_ms(row['avg'])}, p95 {fmt_ms(row['p95'])}"
+    )
+
+
+def build_image_report(
+    records: list[dict[str, Any]],
+    ids: list[str],
+    period: str,
+) -> dict[str, Any]:
+    if period not in PERIODS:
+        period = "1h"
+    _delta, period_title = PERIODS[period]
+    cutoff = window_cutoff(period)
+    stats = [summarize_id(records, item, cutoff) for item in ids]
+    verdict = compare_stats(stats)
+    by_id = {str(item["id"]): item for item in stats}
+    if verdict is not None:
+        order = [*verdict["ranked"], *verdict["missing"]]
+        dimensions = verdict["dimensions"]
+    else:
+        order = [str(item["id"]) for item in stats]
+        dimensions = []
+    notes: list[str] = []
+    axes: list[str] = []
+    if verdict is not None:
+        lead = verdict["lead_tie"]
+        if len(lead) > 1:
+            notes.append("Вровень: " + ", ".join(lead))
+        for name, result in dimensions:
+            if result.get("tied"):
+                notes.append(f"ничья {name}: " + ", ".join(result.get("tied_ids") or []))
+            elif result.get("winner"):
+                value = next(
+                    (shown for instance_id, shown in result["order"] if instance_id == result["winner"]),
+                    "—",
+                )
+                axes.append(f"{name}: {result['winner']} · {value}")
+    commit, commit_title = app_build_identity()
+    rows: list[dict[str, Any]] = []
+    for index, instance_id in enumerate(order, start=1):
+        item = by_id[instance_id]
+        n = int(item["n"])
+        expected = int(item.get("expected") or 0)
+        if n == 0:
+            rows.append(
+                {
+                    "rank": str(index),
+                    "id": instance_id,
+                    "success": "—",
+                    "success_value": None,
+                    "samples": "нет проб",
+                    "errors": "—",
+                    "avg": "—",
+                    "p50": "—",
+                    "p95": "—",
+                    "p99": "—",
+                    "stdev": "—",
+                    "timeouts": "—",
+                    "switches": "—",
+                    "streak": "—",
+                    "advice": "",
+                    "note": "",
+                    "lines": ["Нет проб в этом окне."],
+                }
+            )
+            continue
+        fail = int(item["fail"])
+        samples = f"{n} из {expected}" if expected else str(n)
+        advice = _advice_sentence(instance_id, dimensions) if dimensions else ""
+        note = _advice_note(instance_id, dimensions) or ""
+        node_rows = top_nodes(records, instance_id, cutoff)
+        lines = [
+            f"Минимум {fmt_ms(item['min'])} · максимум {fmt_ms(item['max'])}",
+            _bucket_line(item),
+        ]
+        if node_rows:
+            lines.append("Ноды: " + " | ".join(_node_line(row) for row in node_rows))
+        else:
+            lines.append("Ноды: нет выбранных.")
+        rows.append(
+            {
+                "rank": str(index),
+                "id": instance_id,
+                "success": fmt_pct(int(item["ok"]), n),
+                "success_value": item.get("success"),
+                "samples": samples,
+                "errors": f"{fail} ({fmt_pct(fail, n)})",
+                "avg": fmt_ms(item["avg"]),
+                "p50": fmt_ms(item["p50"]),
+                "p95": fmt_ms(item["p95"]),
+                "p99": fmt_ms(item["p99"]),
+                "stdev": _fmt_sigma(item.get("stdev")),
+                "timeouts": str(item["timeouts"]),
+                "switches": str(int(item.get("node_switches") or 0)),
+                "streak": str(int(item.get("fail_streak") or 0)),
+                "advice": advice,
+                "note": note,
+                "lines": lines,
+            }
+        )
+    return {
+        "title": "Сравнение схем Mihomo",
+        "period": period_title,
+        "meta": [
+            f"Аптайм бота {seconds_human(bot_uptime_seconds())}",
+            f"Аптайм сервера {seconds_human(host_uptime_seconds())}",
+            f"Коммит {commit} · {commit_title}",
+            f"Интервал проб {PROBE_INTERVAL_SEC} с",
+        ],
+        "notes": notes,
+        "axes": axes,
+        "rows": rows,
+    }
+
+
 def render_stats(
     records: list[dict[str, Any]],
     ids: list[str],
@@ -1260,6 +1421,19 @@ class Telegram:
             payload["reply_markup"] = reply_markup
         await self.call("sendMessage", payload)
 
+    async def send_photo(self, chat_id: int | str, png: bytes, caption: str) -> None:
+        data = {"chat_id": str(chat_id), "caption": caption}
+        files = {"photo": ("report.png", png, "image/png")}
+        url = f"{self.base}/sendPhoto"
+        response = await self.client.post(url, data=data, files=files)
+        try:
+            body = response.json()
+        except Exception as exc:  # noqa: BLE001
+            response.raise_for_status()
+            raise RuntimeError("telegram sendPhoto returned non-JSON") from exc
+        if not body.get("ok"):
+            raise RuntimeError(str(body.get("description") or "telegram sendPhoto failed"))
+
     async def edit(
         self,
         chat_id: int | str,
@@ -1338,6 +1512,26 @@ async def show_panel(
         await tg.send(chat_id, "Панель не отправилась. Открой одну схему кнопкой.", None)
 
 
+async def send_report_image(
+    tg: Telegram,
+    store: Store,
+    ids: list[str],
+    chat_id: int | str,
+    period: str,
+) -> None:
+    if period not in PERIODS:
+        period = "1h"
+    records = await store.fetch_since(ids, window_cutoff(period))
+    report = build_image_report(records, ids, period)
+    png = await asyncio.to_thread(render_report_png, report)
+    _delta, title = PERIODS[period]
+    try:
+        await tg.send_photo(chat_id, png, f"Сравнение схем · {title}")
+    except RuntimeError as exc:
+        print(f"sendPhoto failed: {exc}", file=sys.stderr)
+        await tg.send(chat_id, "Картинка не отправилась.", None)
+
+
 async def poll_loop(
     tg: Telegram,
     store: Store,
@@ -1386,6 +1580,11 @@ async def dispatch_update(
                 await tg.answer_callback(callback_id)
             return
         data = str(callback.get("data") or "")
+        if data.startswith("pic:"):
+            period = data.split(":", 1)[1]
+            await tg.answer_callback(callback_id)
+            await send_report_image(tg, store, ids, chat_id, period)
+            return
         period, view, instance_id = parse_stats_cb(data)
         await tg.answer_callback(callback_id)
         message_id = message.get("message_id")
