@@ -1,9 +1,10 @@
-# Isolated subscription: AUTO = url-test(sub5) only.
+# Rejected. See configs/bad/README.md. Not started: only configs/*.yaml is deployed.
+# Candidate: url-test over bot-path subscriptions only (sub1+sub2+sub3).
 # Schema only: subscription URLs and API secret come from bench .env
 # (${SUB1_URL} … ${SUB8_URL}, ${MIHOMO_API_SECRET}) via entrypoint envsubst.
-# Do not publish mixed-port / API. Alias is proxy-sub5, never proxy.
+# Do not publish mixed-port / API. Alias is proxy-botpath, never proxy.
 #
-# Other live providers are commented so this instance measures one subscription.
+# AUTO = url-test(sub1+sub2+sub3). sub4/sub5 stay on WHITELIST, off MATCH,AUTO.
 # Region exclude is off — Anycast and expire rows only. Bot API health: HTTP 404.
 # Providers use SUBSCRIBE: DIRECT first, AUTO if GitHub is blocked.
 # Do not point providers at AUTO alone — deadlock when the tunnel is down.
@@ -49,107 +50,107 @@ dns:
     geoip: false
 
 proxy-providers:
-  # sub1:
-  #   type: http
-  #   url: "${SUB1_URL}"
-  #   path: ./providers/sub1.yaml
-  #   interval: 900
-  #   size-limit: 10485760
-  #   proxy: SUBSCRIBE
-  #   header:
-  #     User-Agent:
-  #       - "clash.meta"
-  #       - "mihomo"
-  #       - "clash-verge"
-  #   health-check:
-  #     enable: true
-  #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
-  #     timeout: 4000
-  #     lazy: true
-  #     expected-status: 204
-  #   override:
-  #     additional-prefix: "s1 | "
-  #     udp: true
-  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+  sub1:
+    type: http
+    url: "${SUB1_URL}"
+    path: ./providers/sub1.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s1 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
 
-  # sub2:
-  #   type: http
-  #   url: "${SUB2_URL}"
-  #   path: ./providers/sub2.yaml
-  #   interval: 900
-  #   size-limit: 10485760
-  #   proxy: SUBSCRIBE
-  #   header:
-  #     User-Agent:
-  #       - "clash.meta"
-  #       - "mihomo"
-  #       - "clash-verge"
-  #   health-check:
-  #     enable: true
-  #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
-  #     timeout: 4000
-  #     lazy: true
-  #     expected-status: 204
-  #   override:
-  #     additional-prefix: "s2 | "
-  #     udp: true
-  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+  sub2:
+    type: http
+    url: "${SUB2_URL}"
+    path: ./providers/sub2.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s2 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
 
-  # sub3:
-  #   type: http
-  #   url: "${SUB3_URL}"
-  #   path: ./providers/sub3.yaml
-  #   interval: 900
-  #   size-limit: 10485760
-  #   proxy: SUBSCRIBE
-  #   header:
-  #     User-Agent:
-  #       - "clash.meta"
-  #       - "mihomo"
-  #       - "clash-verge"
-  #   health-check:
-  #     enable: true
-  #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
-  #     timeout: 4000
-  #     lazy: true
-  #     expected-status: 204
-  #   override:
-  #     additional-prefix: "s3 | "
-  #     udp: true
-  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+  sub3:
+    type: http
+    url: "${SUB3_URL}"
+    path: ./providers/sub3.yaml
+    interval: 900
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s3 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
 
-  # sub4:
-  #   type: http
-  #   url: "${SUB4_URL}"
-  #   path: ./providers/sub4.yaml
-  #   interval: 3600
-  #   size-limit: 10485760
-  #   proxy: SUBSCRIBE
-  #   header:
-  #     User-Agent:
-  #       - "clash.meta"
-  #       - "mihomo"
-  #       - "clash-verge"
-  #   health-check:
-  #     enable: true
-  #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
-  #     timeout: 4000
-  #     lazy: true
-  #     expected-status: 204
-  #   override:
-  #     additional-prefix: "s4 | "
-  #     udp: true
-  #   exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
+  sub4:
+    type: http
+    url: "${SUB4_URL}"
+    path: ./providers/sub4.yaml
+    interval: 3600
+    size-limit: 10485760
+    proxy: SUBSCRIBE
+    header:
+      User-Agent:
+        - "clash.meta"
+        - "mihomo"
+        - "clash-verge"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+      timeout: 4000
+      lazy: true
+      expected-status: 204
+    override:
+      additional-prefix: "s4 | "
+      udp: true
+    exclude-filter: "(?i)expire|expiring|traffic|remain|剩余|流量|过期|官网|套餐|到期|重置|订阅"
 
   sub5:
     type: http
     url: "${SUB5_URL}"
     path: ./providers/sub5.yaml
-    interval: 900
+    interval: 3600
     size-limit: 10485760
     proxy: SUBSCRIBE
     header:
@@ -184,9 +185,9 @@ proxy-providers:
   #   health-check:
   #     enable: true
   #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
+  #     interval: 600
   #     timeout: 4000
-  #     lazy: true
+  #     lazy: false
   #     expected-status: 204
   #   override:
   #     additional-prefix: "s6 | "
@@ -208,9 +209,9 @@ proxy-providers:
   #   health-check:
   #     enable: true
   #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
+  #     interval: 600
   #     timeout: 4000
-  #     lazy: true
+  #     lazy: false
   #     expected-status: 204
   #   override:
   #     additional-prefix: "s7 | "
@@ -232,9 +233,9 @@ proxy-providers:
   #   health-check:
   #     enable: true
   #     url: https://www.gstatic.com/generate_204
-  #     interval: 300
+  #     interval: 600
   #     timeout: 4000
-  #     lazy: true
+  #     lazy: false
   #     expected-status: 204
   #   override:
   #     additional-prefix: "s8 | "
@@ -244,10 +245,13 @@ proxy-providers:
 proxy-groups:
   # Real Bot API: GET /bot is 404 JSON. 200/301/302 matches DPI redirects.
   # Provider health-checks still use gstatic for general liveness.
+  # sub4/sub5 stay off MATCH,AUTO — compare against urltest.yaml (all five).
   - name: AUTO
     type: url-test
     use:
-      - sub5
+      - sub1
+      - sub2
+      - sub3
     url: https://api.telegram.org/bot
     interval: 30
     timeout: 4000
@@ -271,10 +275,17 @@ proxy-groups:
     lazy: false
     max-failed-times: 1
 
+  - name: WHITELIST
+    type: select
+    use:
+      - sub4
+      - sub5
+
   - name: PROXY
     type: select
     proxies:
       - AUTO
+      - WHITELIST
       - DIRECT
 
 rules:

@@ -1,3 +1,4 @@
+# Rejected. See configs/bad/README.md. Not started: only configs/*.yaml is deployed.
 # Isolated subscription: AUTO = url-test(sub1) only.
 # Schema only: subscription URLs and API secret come from bench .env
 # (${SUB1_URL} … ${SUB8_URL}, ${MIHOMO_API_SECRET}) via entrypoint envsubst.
