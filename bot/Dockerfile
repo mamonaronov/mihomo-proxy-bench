@@ -7,7 +7,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py app_version.py downtime.py report_image.py ./
+COPY bot.py app_version.py db_limit.py downtime.py report_image.py ./
 
 ARG GIT_COMMIT=unknown
 ARG GIT_COMMIT_TITLE=unknown

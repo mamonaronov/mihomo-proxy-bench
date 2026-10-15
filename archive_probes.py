@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Move the current probes.db run into results/archive.db, then clear the live db."""
+"""Move the current probes.db run into results/archive.db, then clear the live db.
+
+The archive stays uncompressed and at most 2 GiB on disk; older rows are deleted.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,10 @@ from pathlib import Path
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "bot"))
+
+from db_limit import cap_archive_file, transfer_live_into_archive  # noqa: E402
+
 LIVE_DEFAULT = ROOT / "results" / "probes.db"
 ARCHIVE_DEFAULT = ROOT / "results" / "archive.db"
 
@@ -44,41 +51,6 @@ def readonly_snapshot(path: Path) -> Path:
     return snap
 
 
-def table_exists(conn: sqlite3.Connection, schema: str, name: str) -> bool:
-    row = conn.execute(
-        f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
-        (name,),
-    ).fetchone()
-    return row is not None
-
-
-def init_archive(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS probes (
-          rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-          run_id TEXT NOT NULL,
-          ts TEXT NOT NULL,
-          id TEXT NOT NULL,
-          ok INTEGER NOT NULL,
-          http_status INTEGER,
-          latency_ms REAL,
-          selected TEXT,
-          error TEXT,
-          host_uptime_s REAL
-        )
-        """
-    )
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(probes)")}
-    if "host_uptime_s" not in cols:
-        conn.execute("ALTER TABLE probes ADD COLUMN host_uptime_s REAL")
-    conn.execute("CREATE INDEX IF NOT EXISTS probes_run_id_ts ON probes(run_id, ts)")
-    conn.execute("CREATE INDEX IF NOT EXISTS probes_id_ts ON probes(id, ts)")
-    conn.commit()
-
-
 def remove_live(path: Path) -> None:
     for target in (path, sidecar(path, "-wal"), sidecar(path, "-shm")):
         try:
@@ -108,31 +80,9 @@ def archive_run(live: Path, archive: Path) -> tuple[str, int]:
         snap = source
     archive.parent.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-
-    conn = sqlite3.connect(str(archive))
     try:
-        init_archive(conn)
-        conn.execute("ATTACH DATABASE ? AS live", (str(source.resolve()),))
-        if not table_exists(conn, "live", "probes"):
-            conn.execute("DETACH DATABASE live")
-            conn.close()
-            remove_live(live)
-            return run_id, 0
-        live_cols = {row[1] for row in conn.execute("PRAGMA live.table_info(probes)")}
-        host_sel = "host_uptime_s" if "host_uptime_s" in live_cols else "NULL"
-        conn.execute(
-            f"""
-            INSERT INTO probes (run_id, ts, id, ok, http_status, latency_ms, selected, error, host_uptime_s)
-            SELECT ?, ts, id, ok, http_status, latency_ms, selected, error, {host_sel}
-            FROM live.probes
-            """,
-            (run_id,),
-        )
-        copied = conn.execute("SELECT changes()").fetchone()[0]
-        conn.commit()
-        conn.execute("DETACH DATABASE live")
+        copied = transfer_live_into_archive(source, archive, run_id)
     finally:
-        conn.close()
         if snap is not None:
             snap.unlink(missing_ok=True)
 
@@ -148,6 +98,8 @@ def main() -> None:
     live = Path(args.live)
     archive = Path(args.archive)
     if not live.is_file():
+        if archive.is_file():
+            cap_archive_file(archive)
         print("archive_probes: no live db, skip", file=sys.stderr)
         return
     run_id, copied = archive_run(live, archive)

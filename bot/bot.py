@@ -20,6 +20,7 @@ from urllib.parse import quote
 import httpx
 
 from app_version import app_build_identity
+from db_limit import SHED_BATCH_ROWS, enforce_live_cap, init_live, pack_database
 from downtime import downtime_ticks
 from report_image import render_report_png
 
@@ -249,32 +250,63 @@ def is_timeout(error: str | None) -> bool:
 class Store:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._archive_path = path.parent / "archive.db"
         self._lock = asyncio.Lock()
+        self._shedding = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS probes (
-              rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-              ts TEXT NOT NULL,
-              id TEXT NOT NULL,
-              ok INTEGER NOT NULL,
-              http_status INTEGER,
-              latency_ms REAL,
-              selected TEXT,
-              error TEXT,
-              host_uptime_s REAL
-            )
-            """
-        )
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(probes)")}
-        if "host_uptime_s" not in cols:
-            self._conn.execute("ALTER TABLE probes ADD COLUMN host_uptime_s REAL")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS probes_id_ts ON probes(id, ts)")
-        self._conn.commit()
+        self._conn = self._open()
+        self._enforce_cap(max_rows=None)
+
+    def _open(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        init_live(conn)
+        return conn
+
+    def _rollback(self) -> None:
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
+            pass
+        try:
+            self._conn.execute("DETACH DATABASE arch")
+        except sqlite3.Error:
+            pass
+
+    def _rewrite_live(self) -> None:
+        self._conn.close()
+        try:
+            pack_database(self.path, archive=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"probe db rewrite failed: {exc}", file=sys.stderr)
+        finally:
+            self._conn = self._open()
+
+    def _enforce_cap(self, *, max_rows: int | None) -> None:
+        # max_rows is None at startup: finish the whole shed before serving.
+        passes = 8 if max_rows is None else 1
+        for _ in range(passes):
+            try:
+                shedding, pack = enforce_live_cap(
+                    self._conn,
+                    self.path,
+                    self._archive_path,
+                    shedding=self._shedding,
+                    max_rows=max_rows,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"probe db cap failed: {exc}", file=sys.stderr)
+                self._rollback()
+                return
+            self._shedding = shedding
+            if pack:
+                self._rewrite_live()
+                self._shedding = False
+                if max_rows is not None:
+                    return
+                continue
+            if not shedding or max_rows is not None:
+                return
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
@@ -312,6 +344,7 @@ class Store:
                 ),
             )
             self._conn.commit()
+            self._enforce_cap(max_rows=SHED_BATCH_ROWS)
 
     async def fetch_since(
         self,
