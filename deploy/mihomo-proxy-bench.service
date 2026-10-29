@@ -1,0 +1,25 @@
+# Installed by ./deploy.sh (WorkingDirectory is rewritten to the repo path).
+# ExecStart/ExecStop docker path is rewritten too.
+# Boot runs compose up only: it does not wipe data/ or rebuild images.
+# Manual:
+#   sudo cp deploy/mihomo-proxy-bench.service /etc/systemd/system/mihomo-proxy-bench.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mihomo-proxy-bench.service
+
+[Unit]
+Description=Mihomo proxy bench (test schemas and Telegram summary bot)
+Requires=docker.service
+Wants=network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/mihomo-proxy-bench
+ExecStart=/usr/bin/docker compose -f docker-compose.generated.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.generated.yml stop
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

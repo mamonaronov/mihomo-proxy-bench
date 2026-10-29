@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Stop the bench, wipe subscription cache, rebuild from git, and start it.
+# Installs a systemd unit so the bench comes back after reboot.
+# --once / -o starts it for this boot only and does not install the systemd unit.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -8,6 +11,46 @@ COMPOSE_FILE="docker-compose.generated.yml"
 IMAGE="mihomo-proxy-bench"
 BOT_IMAGE="mihomo-proxy-bench-bot"
 PLACEHOLDERS='change-me|CHANGE-ME|changeme|replace-me|REPLACE_ME|replace_me'
+UNIT="mihomo-proxy-bench.service"
+UNIT_PATH="/etc/systemd/system/${UNIT}"
+WANTS_PATH="/etc/systemd/system/multi-user.target.wants/${UNIT}"
+ONCE=0
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--once|-o]
+
+Cold-cache bench deploy:
+
+  stop bench containers (prod is left running)
+  wipe data/<id> (providers + cache.db) and archive probes
+  build ${IMAGE} from git and recreate containers
+
+  deploy/${UNIT} -> ${UNIT_PATH}
+
+Does not change .env. To update later: git pull --ff-only && ./deploy.sh
+
+  --once, -o      this boot only. Do not install ${UNIT}.
+                  Start containers with restart policy "no", so Docker
+                  does not start them again after a reboot.
+                  An already installed unit is left in place; ./down.sh removes it.
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --once|-o) ONCE=1 ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 err() {
   printf '%s\n' "error: $*" >&2
@@ -53,6 +96,60 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || err "missing command: $1"
 }
 
+run_sudo() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+need_root() {
+  if [[ "$(id -u)" -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+    err "$1"
+  fi
+}
+
+systemd_unit_installed() {
+  if [[ -e "$UNIT_PATH" || -L "$UNIT_PATH" || -e "$WANTS_PATH" || -L "$WANTS_PATH" ]]; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat "$UNIT" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+install_systemd_unit() {
+  echo "==> installing $UNIT (WorkingDirectory=$ROOT)"
+  local docker_bin unit_tmp
+  docker_bin="$(command -v docker)"
+  unit_tmp="$(mktemp)"
+  awk -v wd="$ROOT" -v docker="$docker_bin" '
+    /^WorkingDirectory=/ { print "WorkingDirectory=" wd; next }
+    /^ExecStart=/ { print "ExecStart=" docker " compose -f docker-compose.generated.yml up -d"; next }
+    /^ExecStop=/ { print "ExecStop=" docker " compose -f docker-compose.generated.yml stop"; next }
+    { print }
+  ' "$ROOT/deploy/$UNIT" > "$unit_tmp"
+  run_sudo install -m 644 "$unit_tmp" "$UNIT_PATH"
+  rm -f "$unit_tmp"
+
+  echo "==> systemd daemon-reload"
+  run_sudo systemctl daemon-reload
+  run_sudo systemctl enable "$UNIT"
+}
+
+force_restart_no() {
+  local name policy
+  for name in "$@"; do
+    policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name")"
+    if [[ "$policy" != "no" ]]; then
+      echo "==> restart policy of ${name} is ${policy:-empty}, forcing no"
+      docker update --restart=no "$name" >/dev/null
+    fi
+  done
+}
+
 load_git_version() {
   if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -89,6 +186,10 @@ require_env() {
 need_cmd docker
 need_cmd python3
 docker compose version >/dev/null 2>&1 || err "docker compose plugin is required"
+if [[ "$ONCE" -eq 0 ]]; then
+  need_cmd systemctl
+  need_root "need root or sudo to install the systemd unit"
+fi
 
 [ -f .env ] || err "no .env — copy .env.example and fill in values from prod plus a bench bot token"
 
@@ -110,8 +211,16 @@ if ! docker network inspect telegram-proxy >/dev/null 2>&1; then
   err "Docker network telegram-proxy is missing — start prod mihomo-proxy first (do not create this network here)"
 fi
 
-mapfile -t IDS < <(python3 generate_compose.py --write "$COMPOSE_FILE" --print-ids)
+RESTART_POLICY="unless-stopped"
+if [[ "$ONCE" -eq 1 ]]; then
+  RESTART_POLICY="no"
+fi
+mapfile -t IDS < <(python3 generate_compose.py --write "$COMPOSE_FILE" --print-ids --restart "$RESTART_POLICY")
 [ "${#IDS[@]}" -gt 0 ] || err "generator returned no instance ids"
+
+if [[ "$ONCE" -eq 1 ]] && systemd_unit_installed; then
+  echo "warning: ${UNIT} is already installed; ./down.sh removes it. Until then a reboot starts the bench." >&2
+fi
 
 # Stop running bench first. If we wipe providers while mihomo is still up,
 # the long --no-cache build lets it refill cache.db / providers before recreate.
@@ -148,8 +257,29 @@ docker compose -f "$COMPOSE_FILE" build --pull --no-cache
 docker image inspect "$IMAGE" >/dev/null 2>&1 || err "image ${IMAGE} was not built"
 docker image inspect "$BOT_IMAGE" >/dev/null 2>&1 || err "image ${BOT_IMAGE} was not built"
 
-echo "recreating ${#IDS[@]} mihomo instance(s) + bench-bot..."
+echo "recreating ${#IDS[@]} mihomo instance(s) + bench-bot (restart: ${RESTART_POLICY})..."
 docker compose -f "$COMPOSE_FILE" up -d --force-recreate
 
-echo "up: ${IDS[*]}"
+names=()
+for id in "${IDS[@]}"; do
+  names+=("mihomo-bench-${id}")
+done
+names+=(bench-bot)
+if [[ "$ONCE" -eq 1 ]]; then
+  force_restart_no "${names[@]}"
+else
+  install_systemd_unit
+  run_sudo systemctl start "$UNIT"
+fi
+
+echo "deploy: ${IDS[*]}"
+if [[ "$ONCE" -eq 1 ]]; then
+  if systemd_unit_installed; then
+    echo "boot: Docker restart policy is no; ${UNIT} is still installed and will start the bench after reboot"
+  else
+    echo "boot: stays down after reboot (restart policy no, no systemd unit)"
+  fi
+else
+  echo "boot: ${UNIT} starts the bench after reboot"
+fi
 echo "bot talks to Telegram via prod socks5h://proxy:11808 — prod must stay running"
